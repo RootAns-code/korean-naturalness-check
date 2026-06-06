@@ -1,0 +1,5 @@
+# 코퍼스 빌드 작업 디렉터리 (build_collocation_data.py가 생성)
+scripts/_build_work/
+
+__pycache__/
+*.pyc
