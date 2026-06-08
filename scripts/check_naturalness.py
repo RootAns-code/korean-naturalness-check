@@ -56,8 +56,9 @@ _DB_PATH = os.path.join(_SCRIPT_DIR, '..', 'assets', 'kor_collocation.db')
 _DB_PATH = os.path.normpath(_DB_PATH)
 
 # 시그널 5 임계값. 빈도/유의도 기준은 빌드된 코퍼스에 맞춰 조정 가능.
-COLLOCATION_FREQ_THRESHOLD = 1      # 0건이면 강한 어색 신호
-COLLOCATION_SIG_THRESHOLD = 10.0    # 로그우도 10 미만이면 약한 신호
+# sig(로그우도)는 코퍼스 크기 N에 비례해 커지므로 코퍼스 확장 시 함께 올려야
+# 같은 선택도를 유지한다. 300K → 1M(3.3배) 업그레이드에 맞춰 10.0 → 30.0으로 재보정.
+COLLOCATION_SIG_THRESHOLD = 30.0    # 로그우도 30 미만이면 약한 신호 (1M 코퍼스 기준)
 COLLOCATION_SCORE_ZERO = 12         # 0건 페어당 점수
 COLLOCATION_SCORE_WEAK = 6          # 약한 유의도 페어당 점수
 COLLOCATION_SCORE_MAX = 20          # 시그널 5 최대 점수
