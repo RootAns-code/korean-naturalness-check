@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.1.2
+version: 2.1.3
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -307,7 +307,7 @@ r"판단되어집니다"
 
 ## 동봉 코퍼스 데이터 관리
 
-`assets/kor_collocation.db`는 Leipzig kor_news_2022_1M 패키지(CC BY 4.0)를 형태소 분석해 빌드한 명사+동사 결합 빈도 SQLite DB입니다. 약 3.9MB 크기로 스킬에 동봉되어 모든 사용자(Claude.ai 웹, PC Claude Code 양쪽)가 별도 셋업 없이 즉시 활용 가능합니다.
+`assets/kor_collocation.db`는 Leipzig kor_news_2022_1M 패키지(CC BY 4.0)를 형태소 분석해 빌드한 명사+동사 결합 빈도 SQLite DB입니다. 약 4.3MB 크기로 스킬에 동봉되어 모든 사용자(Claude.ai 웹, PC Claude Code 양쪽)가 별도 셋업 없이 즉시 활용 가능합니다.
 
 코퍼스를 교체하려면 `scripts/build_collocation_data.py`의 `URL` 상수를 바꾼 뒤 스킬 개발자 환경에서 1회 재빌드합니다. 빌드 결과 DB를 `assets/`에 교체 동봉하면 모든 사용자에게 자동 반영됩니다. 현재 1M이 Leipzig 한국어 뉴스 코퍼스의 최대 규모이며, 2022년판이 최신입니다(2023년 이후판 미제공, 2026-06 확인). 추가 확장은 원시 텍스트 코퍼스(HF 데이터셋 등)에서 공기 빈도를 직접 계산하는 파이프라인 재작성이 필요합니다 — 참조 코퍼스 후보 선정 시 웹 크롤 텍스트는 기계번역체 오염 위험이 있어 편집된 한국어(뉴스, 출판물)를 우선합니다.
 

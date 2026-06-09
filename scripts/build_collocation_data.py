@@ -121,15 +121,18 @@ def normalize_word(kiwi, word, want_pos):
         return None
     if not tokens:
         return None
+    # kiwi 0.23+는 용언에 규칙/불규칙 하위태그(VV-R/VV-I/VA-R/VA-I)를 붙인다. 베이스 태그로
+    # 비교해야 '잡/받/듣/새롭' 같은 동사가 누락되지 않는다. 런타임 _extract_noun_verb_pairs와
+    # 반드시 동일한 비교를 써야 DB와 추출이 일치한다(불일치 시 자연 결합이 0건 거짓양성).
     if want_pos == 'N':
         # 명사 어절은 보통 명사+조사 구조. 첫 명사 추출.
         for tok in tokens:
-            if tok.tag in ('NNG', 'NNP') and len(tok.form) >= MIN_NOUN_LEN:
+            if tok.tag.split('-')[0] in ('NNG', 'NNP') and len(tok.form) >= MIN_NOUN_LEN:
                 return tok.form
     elif want_pos == 'V':
         # 동사 어절은 동사어간+어미 구조. 첫 동사 어간 추출.
         for tok in tokens:
-            if tok.tag in ('VV', 'VA') and len(tok.form) >= MIN_VERB_LEN:
+            if tok.tag.split('-')[0] in ('VV', 'VA') and len(tok.form) >= MIN_VERB_LEN:
                 return tok.form
     return None
 

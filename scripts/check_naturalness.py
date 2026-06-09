@@ -189,10 +189,14 @@ def _extract_noun_verb_pairs(tokens):
     last_noun = None
     last_noun_idx = -1
     for i, t in enumerate(tokens):
-        if t.tag in ('NNG', 'NNP'):
+        # kiwi 0.23+는 용언에 규칙/불규칙 하위태그(VV-R/VV-I/VA-R/VA-I)를 붙인다.
+        # 베이스 태그로 비교해야 이 부류를 놓치지 않는다. 빌드 스크립트(normalize_word)도
+        # 반드시 동일한 비교를 써야 DB와 런타임 추출이 일치한다.
+        base = t.tag.split('-')[0]
+        if base in ('NNG', 'NNP'):
             last_noun = t.form
             last_noun_idx = i
-        elif t.tag in ('VV', 'VA') and last_noun is not None:
+        elif base in ('VV', 'VA') and last_noun is not None:
             # 명사와 용언 사이 거리가 10 형태소 이내일 때만 페어로 인정
             if i - last_noun_idx <= 10:
                 pairs.add((last_noun, t.form))
