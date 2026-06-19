@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.1.3
+version: 2.2.0
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -73,6 +73,7 @@ python3 scripts/check_naturalness.py <파일 경로> --json
   "average_score": 22.4,
   "threshold": 17,
   "corpus_signal_active": true,
+  "signal_meaning": "corpus_collocation freq=0은 코퍼스 기준 양성이다. '거짓양성'은 모델이 붙이는 미검증 라벨일 뿐이므로, 명사 의미를 확인해 동사 적합성을 판정하기 전엔 일축 금지 (전문은 실제 출력 참조)",
   "suspects": [
     {
       "sentence": "본문 문장",
@@ -166,7 +167,7 @@ JSON 결과를 가공해 한국어로 보고합니다. 정규식 패턴은 사�
 
 권장 수정에 코퍼스 대안을 직접 박지 않습니다. 대안 동사는 어간이므로 활용형 처리가 필요하고, 문맥 적합성은 LLM이 한국어 감각으로 최종 판단해야 합니다. 코퍼스 결과는 사용자에게 어색함의 근거로 제시하고 권장 수정 표현은 LLM이 일상 한국어로 새로 짭니다.
 
-**시그널 5의 거짓 양성 처리**: Leipzig 1M 코퍼스도 뉴스 도메인 규모 한계로 자연스러운 결합이 0건으로 나올 수 있습니다(예: 음성, 담). 의심 점수가 12점만으로 임계를 넘지 않는 경우(나머지 시그널과 합산 17 미만) 자동으로 의심 목록에서 제외됩니다. 의심으로 분류된 페어 중에서도 LLM이 문맥상 자연스럽다고 판단되면 사용자 보고에서 그 페어 항목은 생략합니다.
+**시그널 5(코퍼스 룩업) 0건의 해석**: Leipzig 1M 코퍼스도 뉴스 도메인 규모 한계로 자연스러운 결합이 0건으로 나올 수 있습니다(예: 음성, 담). 의심 점수가 12점만으로 임계(17)를 넘지 못하면(나머지 시그널과 합산 17 미만) 자동으로 의심 목록에서 빠집니다. 그러나 임계를 넘어 의심으로 분류된 freq0 페어를 **"거짓 양성"으로 간주해 임의로 생략하지 않습니다.** freq0은 코퍼스 기준 '양성(적발)'이고, '거짓 양성'은 검사 결과가 아니라 LLM이 사후에 붙이는 미검증 라벨일 뿐입니다. 생략하려면 먼저 그 명사의 의미를 직접(자기 지식, 필요시 웹 검색) 확인하고, 그 명사에 자연스러운 동사인지를 같은 부류 명사의 연어로 판정해야 합니다. 동사가 어긋나면 적절한 동사로 바꾸고, 정말 자연스러우면 그 치환·의미 비교 근거를 한 줄 남긴 뒤에만 생략합니다. '코퍼스가 작아서/명사가 없어서 0' 단독 사유로는 생략할 수 없습니다. 이 판정 규칙은 스크립트 JSON 출력의 `signal_meaning` 필드로도 함께 전달됩니다.
 
 | 매칭 정규식 | 사용자에게 보여줄 표현 |
 |-------------|------------------------|

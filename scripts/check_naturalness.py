@@ -395,6 +395,14 @@ def evaluate_file(file_path: str, threshold: int = 17) -> dict:
         'average_score': round(avg, 1),
         'threshold': threshold,
         'corpus_signal_active': _collocation_conn is not None,
+        'signal_meaning': (
+            'corpus_collocation freq=0은 코퍼스 기준 양성(적발)이다. '
+            '"거짓양성"은 검사 결과가 아니라 모델이 사후에 붙이는 미검증 라벨일 뿐이다. '
+            '해당 명사의 의미를 직접(자기 지식, 필요시 웹검색) 확인하고 그 명사에 자연스러운 동사인지 '
+            '같은 부류 명사의 연어로 판정하기 전에는 어떤 적발도 일축하지 마라. '
+            '동사가 어긋나면 적절한 동사로 고치고, 자연스러우면 그 치환·의미 비교 근거를 한 줄 남겨라. '
+            '"코퍼스가 작아서/명사가 없어서 0" 단독 사유로는 일축 불가다.'
+        ),
         'suspects': suspects,
         'all_results': results,
     }
@@ -407,6 +415,7 @@ def print_text_report(result: dict, top: int = 10):
     print(f'  의심 문장 수: {result["suspect_count"]} (임계 점수 {result["threshold"]} 이상)')
     print(f'  평균 점수: {result["average_score"]} (낮을수록 자연)')
     print(f'  코퍼스 시그널: {"활성" if result["corpus_signal_active"] else "비활성 (assets/kor_collocation.db 미동봉)"}')
+    print(f'  해석 규칙: {result["signal_meaning"]}')
     print()
 
     if result['suspect_count'] == 0:
