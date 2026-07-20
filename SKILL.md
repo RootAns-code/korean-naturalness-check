@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.3.0
+version: 2.4.0
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -105,14 +105,26 @@ python3 scripts/check_naturalness.py <파일 경로> --json
       "matched_groups": [],
       "awkward_collocations": [
         {
+          "rel": "nv",
           "noun": "기업",
           "verb": "묶이",
           "freq": 0,
           "sig": 0.0,
           "alternatives": [
             {"verb": "거듭나", "freq": 49, "sig": 343.9},
-            {"verb": "늘", "freq": 84, "sig": 239.0},
-            {"verb": "가", "freq": 65, "sig": 102.5}
+            {"verb": "늘", "freq": 84, "sig": 239.0}
+          ]
+        },
+        {
+          "rel": "vn",
+          "noun": "두껍",
+          "verb": "신뢰",
+          "freq": 0,
+          "sig": 0.0,
+          "alternatives": [
+            {"verb": "변함없", "freq": 9, "sig": 85.9},
+            {"verb": "두텁", "freq": 9, "sig": 85.2},
+            {"verb": "깊", "freq": 16, "sig": 75.7}
           ]
         }
       ],
@@ -122,6 +134,10 @@ python3 scripts/check_naturalness.py <파일 경로> --json
   "all_results": [...]
 }
 ```
+
+`awkward_collocations`의 `rel`은 결합 관계입니다 — `nv`: 명사→용언("기업이 묶이다"), `vn`: 형용사 관형형→명사("두꺼운 신뢰"), `av`: '-히'계 부사→용언("급격히 진행하다"). `noun`/`verb` 키는 관계의 왼쪽/오른쪽 요소이고(하위 호환 명명), `alternatives`는 nv면 그 명사의 자연 용언, vn이면 그 명사의 자연 수식어, av면 그 용언의 자연 부사입니다. 2.3까지는 nv만 검사해 수식 관계의 어색함이 통과했습니다(2.4.0에서 확장, 하다류 용언도 nv에 포함).
+
+**단일 수식 적발(12점)은 기본 임계(17)를 넘지 않습니다** — 코퍼스 0건의 모호성(어색 vs 자연이지만 미수록) 판정을 LLM에 위임하는 설계입니다. 파이프라인 소비자는 `--threshold 12`로 실행해 12~16점 구간 중 vn/av 결합이 있는 문장을 재판단 밴드로 처리하는 것을 권합니다.
 
 `oov_nouns`(최상위·문장별)는 코퍼스에 아예 없어 시그널 5가 판정 불가로 침묵한 명사 목록입니다. 코퍼스 기준 시점(2022) 이후 신조어·고유명사가 주로 여기에 잡히며, 이 명사들의 결합은 **검사를 통과한 것이 아니라 검사를 받지 않은 것**입니다.
 
@@ -274,12 +290,12 @@ JSON 결과를 가공해 한국어로 보고합니다. 정규식 패턴은 사�
 
 ## 도구의 검증 정확도와 한계
 
-`eval/run_eval.py` 라벨셋(자연 70문장·어색 72문장, 2.3.0 기준) 실측:
+`eval/run_eval.py` 라벨셋(자연 78문장·어색 80문장, 2.4.0 기준 — 수식 관계 표적 문장 포함) 실측:
 
-- 어색 문장 재현율 86.1% (62/72)
-- 자연 문장 거짓양성률 10.0% (7/70)
-- 정밀도 89.9%
-- 자연 평균 7.2점 vs 어색 평균 26.8점 (격차 +19.6)
+- 어색 문장 재현율 85.0% (68/80), 임계 12 재판단 밴드까지 포함 시 90.0%
+- 자연 문장 거짓양성률 12.8% (10/78)
+- 정밀도 87.2%
+- 자연 평균 8.0점 vs 어색 평균 30.5점 (격차 +22.5)
 
 해석 시 유의점 두 가지입니다.
 
@@ -327,7 +343,7 @@ r"판단되어[지진졌]"
 
 ## 동봉 코퍼스 데이터 관리
 
-`assets/kor_collocation.db`는 Leipzig kor_news_2022_1M 패키지(CC BY 4.0)의 **원문 100만 문장**을 kiwipiepy로 형태소 분석해 빌드한 명사+동사 결합 빈도 SQLite DB입니다(163,272페어, 명사 19,284종, 동사 2,258종, 약 12.5MB). 스킬에 동봉되어 모든 사용자(Claude.ai 웹, PC Claude Code 양쪽)가 별도 셋업 없이 즉시 활용 가능합니다.
+`assets/kor_collocation.db`는 Leipzig kor_news_2022_1M 패키지(CC BY 4.0)의 **원문 100만 문장**을 kiwipiepy로 형태소 분석해 빌드한 결합 빈도 SQLite DB입니다(총 319,683결합 = nv 286,562 / vn 28,590 / av 4,531, 약 36.5MB). 스킬에 동봉되어 모든 사용자(Claude.ai 웹, PC Claude Code 양쪽)가 별도 셋업 없이 즉시 활용 가능합니다.
 
 빌드 파이프라인의 핵심 원칙은 **DB와 런타임이 같은 추출기를 쓴다**는 것입니다. `build_collocation_data.py`는 `check_naturalness.py`의 `_extract_noun_verb_pairs`를 그대로 임포트해 코퍼스를 집계하므로, 런타임이 조회하는 페어 분포와 DB의 페어 분포가 정의상 일치합니다(2.x 시절 인접 어절 공기표 기반 DB가 "사진을 예쁘게 찍다" 같은 비인접 자연 결합을 0건 거짓양성으로 만들던 구조적 불일치를 차단). 따라서 **추출기 규칙을 수정하면 반드시 DB를 재빌드합니다.** 유의도는 Dunning 로그우도(LLR)를 자체 계산하며, DB의 `build_info` 테이블에 빌드 출처·kiwipiepy 버전이 기록됩니다.
 

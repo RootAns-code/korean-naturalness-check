@@ -43,7 +43,7 @@ try:
     # check_naturalness의 추출 규칙(VA+게 스킵, "N과 같이" 스킵, 거리 10)을
     # 바꾸면 반드시 이 스크립트로 DB를 재빌드해야 한다.
     import check_naturalness as _cn
-    from check_naturalness import _extract_noun_verb_pairs, _kiwi
+    from check_naturalness import _extract_collocation_pairs, _kiwi
     import kiwipiepy
 except ImportError as e:
     print(f'FAIL: 의존성 로드 실패 ({e}). pip install kiwipiepy 후 재실행.')
@@ -104,10 +104,15 @@ def iter_sentences(sentences_path):
 
 
 def count_pairs(sentences_path):
-    """전체 문장을 형태소 분석해 (명사, 동사) 페어 빈도와 주변 빈도를 집계."""
-    pair_freq = Counter()
-    noun_freq = Counter()
-    verb_freq = Counter()
+    """전체 문장을 형태소 분석해 관계별 결합 빈도와 주변 빈도를 집계.
+
+    관계(rel): nv(명사→용언), vn(관형→명사), av(부사→용언). 런타임 추출기와
+    동일 함수를 쓰므로 분포가 정의상 일치한다.
+    """
+    pair_freq = Counter()   # (rel, left, right) -> freq
+    left_freq = Counter()   # (rel, left) -> freq
+    right_freq = Counter()  # (rel, right) -> freq
+    rel_total = Counter()   # rel -> 전체 인스턴스
     n_sent = 0
     t0 = time.time()
     # kiwi.tokenize에 이터러블을 넘기면 내부 배치 처리로 문장별 토큰열을 돌려준다
@@ -115,14 +120,16 @@ def count_pairs(sentences_path):
         n_sent += 1
         if n_sent % 100000 == 0:
             elapsed = time.time() - t0
-            print(f'    진행: {n_sent}문장, 고유 페어 {len(pair_freq)}, {elapsed:.0f}s')
-        for noun, verb in _extract_noun_verb_pairs(tokens):
-            pair_freq[(noun, verb)] += 1
-            noun_freq[noun] += 1
-            verb_freq[verb] += 1
+            print(f'    진행: {n_sent}문장, 고유 결합 {len(pair_freq)}, {elapsed:.0f}s')
+        for rel, left, right in _extract_collocation_pairs(tokens):
+            pair_freq[(rel, left, right)] += 1
+            left_freq[(rel, left)] += 1
+            right_freq[(rel, right)] += 1
+            rel_total[rel] += 1
     elapsed = time.time() - t0
-    print(f'    완료: {n_sent}문장, 고유 페어 {len(pair_freq)}, {elapsed:.0f}s')
-    return pair_freq, noun_freq, verb_freq
+    print(f'    완료: {n_sent}문장, 고유 결합 {len(pair_freq)}, {elapsed:.0f}s')
+    print(f'    관계별 인스턴스: {dict(rel_total)}')
+    return pair_freq, left_freq, right_freq, rel_total
 
 
 def _ll(x):
@@ -146,7 +153,7 @@ def log_likelihood(k11, noun_total, verb_total, grand_total):
     return max(llr, 0.0)
 
 
-def build_db(pair_freq, noun_freq, verb_freq):
+def build_db(pair_freq, left_freq, right_freq, rel_total):
     OUTPUT_DB.parent.mkdir(exist_ok=True, parents=True)
     # check_naturalness 임포트가 현행 DB에 연결을 연 상태라 Windows에서는
     # 바로 덮어쓸 수 없다. 임시 파일에 빌드한 뒤 연결을 닫고 원자 교체한다.
@@ -154,33 +161,37 @@ def build_db(pair_freq, noun_freq, verb_freq):
     if tmp_db.exists():
         tmp_db.unlink()
 
-    grand_total = sum(pair_freq.values())
     rows = []
-    for (noun, verb), freq in pair_freq.items():
+    for (rel, left, right), freq in pair_freq.items():
         if freq < MIN_FREQ:
             continue
-        sig = log_likelihood(freq, noun_freq[noun], verb_freq[verb], grand_total)
-        rows.append((noun, verb, freq, sig))
-    rows.sort(key=lambda r: -r[2])  # 빈도 내림차순
+        # LLR은 관계별 주변 분포로 계산 (nv/vn/av는 서로 다른 모집단)
+        sig = log_likelihood(freq, left_freq[(rel, left)], right_freq[(rel, right)],
+                             rel_total[rel])
+        rows.append((rel, left, right, freq, sig))
+    rows.sort(key=lambda r: -r[3])  # 빈도 내림차순
 
     conn = sqlite3.connect(tmp_db)
     conn.execute('''CREATE TABLE collocation (
+        rel  TEXT NOT NULL,
         noun TEXT NOT NULL,
         verb TEXT NOT NULL,
         freq INTEGER NOT NULL,
         sig REAL NOT NULL
     )''')
-    conn.executemany("INSERT INTO collocation VALUES (?, ?, ?, ?)", rows)
-    conn.execute("CREATE INDEX idx_noun_verb ON collocation(noun, verb)")
-    conn.execute("CREATE INDEX idx_noun_sig ON collocation(noun, sig DESC)")
+    conn.executemany("INSERT INTO collocation VALUES (?, ?, ?, ?, ?)", rows)
+    conn.execute("CREATE INDEX idx_rel_noun_verb ON collocation(rel, noun, verb)")
+    conn.execute("CREATE INDEX idx_rel_noun_sig ON collocation(rel, noun, sig DESC)")
+    conn.execute("CREATE INDEX idx_rel_verb_sig ON collocation(rel, verb, sig DESC)")
     # 빌드 출처 메타데이터. 런타임 필수 아님(향후 kiwi 버전 불일치 진단용).
     conn.execute('CREATE TABLE build_info (key TEXT PRIMARY KEY, value TEXT)')
     conn.executemany("INSERT INTO build_info VALUES (?, ?)", [
         ('corpus', Path(URL).name),
-        ('pipeline', 'sentences-runtime-extractor'),
+        ('pipeline', 'sentences-runtime-extractor-multirel'),
         ('kiwipiepy_version', kiwipiepy.__version__),
         ('built_date', date.today().isoformat()),
-        ('pair_instances_total', str(grand_total)),
+        ('pair_instances_total', str(sum(rel_total.values()))),
+        ('rel_totals', str(dict(rel_total))),
         ('min_freq', str(MIN_FREQ)),
     ])
     conn.commit()
@@ -194,43 +205,46 @@ def build_db(pair_freq, noun_freq, verb_freq):
 
     size_kb = OUTPUT_DB.stat().st_size // 1024
     print(f'  빌드 완료: {OUTPUT_DB}')
-    print(f'  페어 수: {len(rows)} (인스턴스 {grand_total})')
+    print(f'  결합 수: {len(rows)} (인스턴스 {sum(rel_total.values())})')
     print(f'  DB 크기: {size_kb} KB')
 
 
 def smoke_test():
-    """빌드 결과 검증. 자연 페어와 어색 페어 빈도 차이 확인."""
+    """빌드 결과 검증. 관계별로 자연 결합과 어색 결합의 빈도 차이 확인."""
     print()
     print('스모크 테스트:')
     conn = sqlite3.connect(OUTPUT_DB)
-    test_pairs = [
-        ('기업', '묶이'),     # 어색 의심 (LLM 산출물에서 관찰)
-        ('기업', '소개'),     # 자연
-        ('사례', '모으'),     # 자연
-        ('사진', '찍'),       # 자연 (비인접 수식 구문에서도 잡혀야 함)
-        ('빵', '사'),         # 자연 (구 co_n DB에서 0건이던 일상 결합)
-        ('인사', '건네'),     # 자연
+    test_triples = [
+        ('nv', '기업', '묶이'),      # 어색 의심 (LLM 산출물에서 관찰)
+        ('nv', '사진', '찍'),        # 자연
+        ('nv', '빵', '사'),          # 자연
+        ('nv', '편지', '발견하'),    # 자연 (2.4 신규: 하다동사)
+        ('vn', '두껍', '신뢰'),      # 어색 의심 ("두터운 신뢰"가 자연)
+        ('vn', '두텁', '신뢰'),      # 자연
+        ('vn', '따뜻하', '커피'),    # 자연 (2.4 신규: XSA 파생)
+        ('av', '급격히', '진행하'),  # 어색 의심
+        ('av', '빠르게', '진행하'),  # 자연 후보
     ]
-    for noun, verb in test_pairs:
+    for rel, left, right in test_triples:
         row = conn.execute(
-            "SELECT freq, sig FROM collocation WHERE noun=? AND verb=?",
-            (noun, verb)
+            "SELECT freq, sig FROM collocation WHERE rel=? AND noun=? AND verb=?",
+            (rel, left, right)
         ).fetchone()
         if row:
-            print(f'  ({noun}, {verb}): freq={row[0]}, sig={row[1]:.1f}')
+            print(f'  [{rel}] ({left}, {right}): freq={row[0]}, sig={row[1]:.1f}')
         else:
-            print(f'  ({noun}, {verb}): 0건 (코퍼스에 결합 없음)')
+            print(f'  [{rel}] ({left}, {right}): 0건 (코퍼스에 결합 없음)')
     print()
-    print('  "사진" 명사의 자연 동사 상위 5개 (sig 기준):')
+    print('  "신뢰"를 수식하는 자연 관형 용언 상위 5개 (sig 기준):')
     for row in conn.execute(
-        "SELECT verb, freq, sig FROM collocation WHERE noun='사진' ORDER BY sig DESC LIMIT 5"
+        "SELECT noun, freq, sig FROM collocation WHERE rel='vn' AND verb='신뢰' ORDER BY sig DESC LIMIT 5"
     ):
         print(f'    {row[0]} (freq={row[1]}, sig={row[2]:.1f})')
     conn.close()
 
 
 def main():
-    print('한국어 명사+동사 결합 빈도 DB 빌드 (문장 원문 파이프라인)')
+    print('한국어 결합 빈도 DB 빌드 (문장 원문 파이프라인, 다중 관계)')
     print('='*60)
     print('[1/4] Leipzig kor_news_2022_1M 패키지 다운로드')
     tar_path = download_corpus()
@@ -238,10 +252,10 @@ def main():
     extract_dir = extract_corpus(tar_path)
     sentences_path = find_sentences_file(extract_dir)
     print(f'  sentences.txt 위치: {sentences_path}')
-    print('[3/4] 형태소 분석 및 명사+동사 페어 집계')
-    pair_freq, noun_freq, verb_freq = count_pairs(sentences_path)
-    print('[4/4] SQLite DB 빌드 (LLR 유의도 계산 포함)')
-    build_db(pair_freq, noun_freq, verb_freq)
+    print('[3/4] 형태소 분석 및 결합 집계 (nv/vn/av)')
+    pair_freq, left_freq, right_freq, rel_total = count_pairs(sentences_path)
+    print('[4/4] SQLite DB 빌드 (관계별 LLR 유의도 계산 포함)')
+    build_db(pair_freq, left_freq, right_freq, rel_total)
     smoke_test()
     print('='*60)
     print('완료. 결과 DB를 스킬 패키지의 assets/ 에 동봉하면 됨.')

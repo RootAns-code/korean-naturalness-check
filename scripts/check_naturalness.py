@@ -66,14 +66,19 @@ _DB_PATH = os.path.normpath(_DB_PATH)
 # 게이트한다. 조정 시 eval/run_eval.py로 전후 실측이 필수.
 COLLOCATION_SIG_THRESHOLD = 3.84    # LLR p<0.05 경계. 이 미만이면 우연과 구분 불가
 COLLOCATION_WEAK_MAX_FREQ = 4       # 이 빈도 이하 + 저유의도일 때만 약한 벌점
-COLLOCATION_SCORE_ZERO = 12         # 0건 페어당 점수
+# 관계별 0건 벌점. 단독으로는 임계(17) 미달이 설계 의도다 — 코퍼스 0건의
+# 본질적 모호성(어색 vs 자연이지만 뉴스 미수록) 최종 판정은 LLM에 위임하고,
+# 소비자는 --threshold 12로 실행해 12~16점 구간을 재판단 밴드로 쓸 수 있다.
+# 벌점을 임계 이상으로 올리면 (천천히,오르) 같은 자연-희소 결합이 단독
+# 거짓양성이 되는 것을 실측으로 확인함(2026-07-20). 조정 시 eval 실측 필수.
+COLLOCATION_SCORE_ZERO = {'nv': 12, 'vn': 12, 'av': 12}
 COLLOCATION_SCORE_WEAK = 6          # 약한 유의도 페어당 점수
 COLLOCATION_SCORE_MAX = 20          # 시그널 5 최대 점수
 
 
 def _load_collocation_db():
     if not os.path.exists(_DB_PATH):
-        return None
+        return None, False
     try:
         conn = sqlite3.connect(_DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -81,13 +86,15 @@ def _load_collocation_db():
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='collocation'")
         if cur.fetchone() is None:
             conn.close()
-            return None
-        return conn
+            return None, False
+        # rel 컬럼(2.4.0 다중 관계 DB) 여부. 구 DB면 nv만 검사(하위 호환).
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(collocation)")]
+        return conn, ('rel' in cols)
     except sqlite3.Error:
-        return None
+        return None, False
 
 
-_collocation_conn = _load_collocation_db()
+_collocation_conn, _DB_HAS_REL = _load_collocation_db()
 
 
 # ============================================================
@@ -169,6 +176,13 @@ AWKWARD_PATTERN_GROUPS = [
     ('수있을것', 18, [
         r"수\s*있을\s*것",
     ]),
+    ('직역_명사구', 18, [
+        # 동사 관형형이 추상명사를 수식하는 영어 직역 구조. kiwi가 "미는"을
+        # 명사+조사로 오분석해 통계(s5)로는 못 잡는 부류라 정규식으로 차단
+        # (2026-07-20 실측: "유료 전환을 미는 압박이 됩니다" s5 0점 통과).
+        r"[을를]\s*미는\s*(압박|힘|요인|흐름)",
+        r"미는\s*압박",
+    ]),
     # --- 강한 신호 (12점): 어색 경향이 강하나 격식문에 자연 용례도 있는 문형 ---
     ('보고서투_명사화_의', 12, [
         r"의\s*(인상|인하|상승|하락|증가|감소|구매|증대|확보|유지|해소|실천|실시|획득|제공|향상|도출|달성|마무리|조화)",
@@ -224,31 +238,42 @@ AWKWARD_PATTERN_GROUPS = [
 AWKWARD_PATTERNS = [p for _, _, ps in AWKWARD_PATTERN_GROUPS for p in ps]
 
 
-def _extract_noun_verb_pairs(tokens):
-    """문장 토큰열에서 (명사 어간, 동사/형용사 어간) 페어 추출.
+def _predicate_stem(tokens, i):
+    """i번 토큰이 용언 어간이면 (어간, 소모된 파생 어근 인덱스) 반환. 아니면 (None, None).
 
-    같은 문장 안에서 명사가 등장한 뒤 가장 가까운 후속 동사/형용사를 페어로 묶는다.
-    조사는 룩업 키에서 제외해 활용형 분산을 줄인다. 한 명사는 가까운 용언과만
-    매칭해 너무 멀리 떨어진 결합으로 인한 잡음을 피한다.
+    VV/VA뿐 아니라 명사·어근+XSV/XSA 파생 용언(발견하다, 따뜻하다, 우수하다)도
+    어간으로 묶는다. 2.3.0까지는 하다류 용언이 통째로 검사 밖이었다(2026-07-19 확인).
+    kiwi 0.23+의 규칙/불규칙 하위태그(VV-R 등)는 베이스 태그 비교로 흡수한다.
+    """
+    t = tokens[i]
+    base = t.tag.split('-')[0]
+    if base in ('VV', 'VA'):
+        return t.form, None
+    if base in ('XSV', 'XSA') and i > 0 and tokens[i - 1].tag.split('-')[0] in ('NNG', 'XR'):
+        return tokens[i - 1].form + t.form, i - 1
+    return None, None
 
-    빌드 스크립트(build_collocation_data.py)가 이 함수를 그대로 임포트해 코퍼스를
-    집계하므로, 여기를 고치면 DB도 재빌드해야 추출-DB가 일치한다(2.1.3 교훈).
 
-    반환: [(noun, verb), ...] 중복 제거됨.
+def _extract_collocation_pairs(tokens):
+    """문장 토큰열에서 논항·수식 결합 트리플 추출.
+
+    반환: [(rel, left, right), ...] 중복 제거됨.
+      rel='nv': 명사 → 후속 용언        예: (편지, 발견하), (기업, 묶이)
+      rel='vn': 용언 관형형 → 수식 명사  예: (두껍, 신뢰), (따뜻하, 커피)
+      rel='av': 부사 → 후속 용언        예: (급격히, 진행하)
+    2.3.0까지는 nv만 검사해 관형어·부사 수식의 어색함("두꺼운 신뢰", "급격히
+    진행했다")이 전부 통과했다. 세 관계 모두 같은 함수로 추출하고, 빌드
+    스크립트가 이 함수를 그대로 임포트해 DB를 집계하므로 여기를 고치면
+    반드시 DB를 재빌드한다(2.1.3 교훈).
     """
     pairs = set()
-    last_noun = None
-    last_noun_idx = -1
+    noun_hist = []      # [(form, idx)] 최근 명사들 (파생 어근 구분용)
+    adv, adv_idx = None, -1
     n = len(tokens)
     for i, t in enumerate(tokens):
-        # kiwi 0.23+는 용언에 규칙/불규칙 하위태그(VV-R/VV-I/VA-R/VA-I)를 붙인다.
-        # 베이스 태그로 비교해야 이 부류를 놓치지 않는다.
         base = t.tag.split('-')[0]
         if base in ('NNG', 'NNP'):
-            # "N과 같이/같은"의 N은 비교 관용구라 서술 관계가 아님. 이 명사를
-            # 건너뛰고 앞선 명사를 유지해야 "기업이 다음과 같이 묶입니다"에서
-            # (다음, 묶이)가 아니라 (기업, 묶이)가 나온다. "N보다"(비교 부사어,
-            # 예: "생각보다 재미있다")의 N도 서술 관계가 아니므로 같이 건너뛴다.
+            # "N과 같이/같은", "N보다"의 N은 비교 관용구라 서술 관계가 아님 → 제외
             nxt = tokens[i + 1] if i + 1 < n else None
             nx2 = tokens[i + 2] if i + 2 < n else None
             if (nxt is not None and nxt.tag.startswith('J') and nxt.form in ('과', '와')
@@ -256,37 +281,72 @@ def _extract_noun_verb_pairs(tokens):
                 continue
             if nxt is not None and nxt.tag.startswith('J') and nxt.form == '보다':
                 continue
-            last_noun = t.form
-            last_noun_idx = i
-        elif base in ('VV', 'VA') and last_noun is not None:
-            # "사진을 예쁘게 찍다"의 '예쁘게'(VA+게)는 부사어라 명사의 서술어가
-            # 아님. 페어를 만들지도, 명사를 소모하지도 않고 본용언을 기다린다.
-            nxt = tokens[i + 1] if i + 1 < n else None
-            if base == 'VA' and nxt is not None and nxt.form == '게' and nxt.tag == 'EC':
+            noun_hist.append((t.form, i))
+        elif base == 'MAG':
+            adv, adv_idx = t.form, i
+        else:
+            stem, root_idx = _predicate_stem(tokens, i)
+            if stem is None:
                 continue
-            # 지시 용언(그렇다/이렇다/어떻다)은 내용 서술어가 아니라 페어 무의미.
-            # "노트북이라 그런지"가 (노트북, 그렇)로 잡히는 잡음 방지.
+            nxt = tokens[i + 1] if i + 1 < n else None
+            # 부사화(V+게): "예쁘게 찍다", "나도 모르게" — 서술어가 아니므로
+            # 명사를 소모하지 않고 본용언을 기다린다 (VA뿐 아니라 VV도 해당)
+            if nxt is not None and nxt.form == '게' and nxt.tag == 'EC':
+                continue
+            # 지시 용언은 내용 서술어가 아님 ("노트북이라 그런지" 잡음 방지)
             if t.form in ('그렇', '이렇', '저렇', '어떻', '그러', '이러', '저러'):
                 continue
-            # 명사와 용언 사이 거리가 10 형태소 이내일 때만 페어로 인정
-            if i - last_noun_idx <= 10:
-                pairs.add((last_noun, t.form))
-            last_noun = None
-            last_noun_idx = -1
+            # vn: 형용사 관형형(ETM)이 바로 다음 명사를 수식.
+            # 형용사(VA/XSA)로 제한한다 — 어색 수식("두꺼운 신뢰", "깊은 가격")은
+            # 형용사에서 나오고, 일반 동사 관형형("산 신발", "남은 재료")까지 검사하면
+            # 뉴스 코퍼스 희소성 때문에 자연 결합이 대량 거짓양성이 된다(2026-07-20 실측).
+            is_adjective = t.tag.split('-')[0] in ('VA', 'XSA')
+            if (is_adjective and nxt is not None and nxt.tag == 'ETM' and i + 2 < n
+                    and tokens[i + 2].tag.split('-')[0] in ('NNG', 'NNP')):
+                pairs.add(('vn', stem, tokens[i + 2].form))
+            # av: 직전 부사(6형태소 이내)가 이 용언을 수식.
+            # '-히' 한자어계 부사로 제한한다 — 보고서투 부사 남용("급격히 진행",
+            # "활발히 해결")이 표적이고, 일상 부사(정말/바로/새로/늘)는 자유 결합이라
+            # 코퍼스 부재가 어색의 증거가 못 된다(2026-07-20 실측).
+            if adv is not None and i - adv_idx <= 6:
+                if adv.endswith('히') and adv != '같이':
+                    pairs.add(('av', adv, stem))
+                adv = None
+            # nv: 가장 가까운 선행 명사(10형태소 이내). 하다류 파생 어근 자신은 제외
+            # ("편지를 발견하다"에서 (발견, 발견하)가 아니라 (편지, 발견하))
+            for form, idx in reversed(noun_hist):
+                if root_idx is not None and idx == root_idx:
+                    continue
+                if i - idx <= 10:
+                    pairs.add(('nv', form, stem))
+                break
+            noun_hist.clear()
     return list(pairs)
 
 
-def _lookup_collocation(noun, verb):
-    """코퍼스 DB에서 (noun, verb) 페어 빈도와 유의도 조회.
+def _extract_noun_verb_pairs(tokens):
+    """하위 호환: nv 결합만 (noun, verb) 페어로 반환."""
+    return [(l, r) for rel, l, r in _extract_collocation_pairs(tokens) if rel == 'nv']
 
-    반환: (freq, sig) 또는 None (페어가 DB에 없음).
+
+def _lookup_collocation(rel, left, right):
+    """코퍼스 DB에서 (rel, left, right) 결합 빈도와 유의도 조회.
+
+    반환: (freq, sig) 또는 None (결합이 DB에 없음).
+    DB 컬럼명은 하위 호환을 위해 noun(=left)/verb(=right)를 유지한다.
     """
     if _collocation_conn is None:
         return None
-    row = _collocation_conn.execute(
-        "SELECT freq, sig FROM collocation WHERE noun=? AND verb=?",
-        (noun, verb)
-    ).fetchone()
+    if _DB_HAS_REL:
+        row = _collocation_conn.execute(
+            "SELECT freq, sig FROM collocation WHERE rel=? AND noun=? AND verb=?",
+            (rel, left, right)).fetchone()
+    else:
+        if rel != 'nv':
+            return None
+        row = _collocation_conn.execute(
+            "SELECT freq, sig FROM collocation WHERE noun=? AND verb=?",
+            (left, right)).fetchone()
     if row is None:
         return None
     return (row['freq'], row['sig'])
@@ -300,40 +360,65 @@ FUNCTION_VERBS = frozenset([
 ])
 
 
-def _top_alternatives(noun, limit=5):
-    """주어진 명사와 자주 결합하는 자연 동사 상위 N개 (sig 기준).
+def _top_alternatives(rel, left, right, limit=5):
+    """어색 결합의 자연 대안 상위 N개 (sig 기준).
 
-    기능성 용언(FUNCTION_VERBS)은 걸러서 내용어 동사만 추천한다.
+    nv: 그 명사(left)와 자주 결합하는 용언들.
+    vn: 그 명사(right)를 자주 수식하는 관형 용언들 (예: 신뢰 → 두텁, 깊).
+    av: 그 용언(right)과 자주 어울리는 부사들.
+    기능성 용언(FUNCTION_VERBS)은 걸러서 내용어만 추천한다.
     """
     if _collocation_conn is None:
         return []
-    rows = _collocation_conn.execute(
-        "SELECT verb, freq, sig FROM collocation WHERE noun=? ORDER BY sig DESC LIMIT ?",
-        (noun, limit + len(FUNCTION_VERBS))
-    ).fetchall()
+    if _DB_HAS_REL:
+        if rel == 'nv':
+            q, key = ("SELECT verb AS alt, freq, sig FROM collocation "
+                      "WHERE rel='nv' AND noun=? ORDER BY sig DESC LIMIT ?"), left
+        elif rel == 'vn':
+            q, key = ("SELECT noun AS alt, freq, sig FROM collocation "
+                      "WHERE rel='vn' AND verb=? ORDER BY sig DESC LIMIT ?"), right
+        else:
+            q, key = ("SELECT noun AS alt, freq, sig FROM collocation "
+                      "WHERE rel='av' AND verb=? ORDER BY sig DESC LIMIT ?"), right
+    else:
+        if rel != 'nv':
+            return []
+        q, key = ("SELECT verb AS alt, freq, sig FROM collocation "
+                  "WHERE noun=? ORDER BY sig DESC LIMIT ?"), left
+    rows = _collocation_conn.execute(q, (key, limit + len(FUNCTION_VERBS))).fetchall()
     out = []
     for r in rows:
-        if r['verb'] in FUNCTION_VERBS:
+        if r['alt'] in FUNCTION_VERBS:
             continue
-        out.append({'verb': r['verb'], 'freq': r['freq'], 'sig': round(r['sig'], 1)})
+        out.append({'verb': r['alt'], 'freq': r['freq'], 'sig': round(r['sig'], 1)})
         if len(out) >= limit:
             break
     return out
 
 
-def _is_noun_in_corpus(noun):
-    """명사가 코퍼스에 한 번이라도 결합 페어로 등장하는지 확인.
+def _is_left_in_corpus(rel, left):
+    """결합의 왼쪽 요소가 해당 관계로 코퍼스에 한 번이라도 등장하는지 확인.
 
-    코퍼스에 없는 명사는 빌드 누락이거나 매우 희귀한 명사일 가능성이 커서
-    동사 결합을 판정 못 함. 이 경우 시그널 5는 침묵.
+    코퍼스에 없는 요소는 빌드 누락이거나 매우 희귀할 가능성이 커서
+    결합을 판정 못 함. 이 경우 그 결합에 대해 시그널 5는 침묵.
     """
     if _collocation_conn is None:
         return False
-    row = _collocation_conn.execute(
-        "SELECT 1 FROM collocation WHERE noun=? LIMIT 1",
-        (noun,)
-    ).fetchone()
+    if _DB_HAS_REL:
+        row = _collocation_conn.execute(
+            "SELECT 1 FROM collocation WHERE rel=? AND noun=? LIMIT 1",
+            (rel, left)).fetchone()
+    else:
+        if rel != 'nv':
+            return False
+        row = _collocation_conn.execute(
+            "SELECT 1 FROM collocation WHERE noun=? LIMIT 1", (left,)).fetchone()
     return row is not None
+
+
+def _is_noun_in_corpus(noun):
+    """하위 호환: 명사가 nv 관계로 코퍼스에 등장하는지 확인 (oov_nouns 판정용)."""
+    return _is_left_in_corpus('nv', noun)
 
 
 def naturalness_score(sentence: str) -> dict:
@@ -401,21 +486,22 @@ def naturalness_score(sentence: str) -> dict:
             if t.tag.split('-')[0] in ('NNG', 'NNP') and t.form not in oov_nouns:
                 if not _is_noun_in_corpus(t.form):
                     oov_nouns.append(t.form)
-        nv_pairs = _extract_noun_verb_pairs(tokens)
-        for noun, verb in nv_pairs:
-            # 명사가 코퍼스에 아예 없으면 판정 불가 (빌드 누락 명사). 침묵.
-            if not _is_noun_in_corpus(noun):
+        triples = _extract_collocation_pairs(tokens)
+        for rel, left, right in triples:
+            # 왼쪽 요소가 코퍼스에 아예 없으면 판정 불가 (빌드 누락). 침묵.
+            if not _is_left_in_corpus(rel, left):
                 continue
-            result = _lookup_collocation(noun, verb)
+            result = _lookup_collocation(rel, left, right)
             if result is None:
-                # 명사는 코퍼스에 있는데 이 동사와 결합 0건 → 강한 신호
-                s5 += COLLOCATION_SCORE_ZERO
+                # 왼쪽 요소는 코퍼스에 있는데 이 결합은 0건 → 강한 신호
+                s5 += COLLOCATION_SCORE_ZERO[rel]
                 awkward_collocations.append({
-                    'noun': noun,
-                    'verb': verb,
+                    'rel': rel,
+                    'noun': left,
+                    'verb': right,
                     'freq': 0,
                     'sig': 0.0,
-                    'alternatives': _top_alternatives(noun, limit=5),
+                    'alternatives': _top_alternatives(rel, left, right, limit=5),
                 })
             else:
                 freq, sig = result
@@ -423,11 +509,12 @@ def naturalness_score(sentence: str) -> dict:
                     # 결합이 희소하고 유의도도 우연 수준 → 약한 신호
                     s5 += COLLOCATION_SCORE_WEAK
                     awkward_collocations.append({
-                        'noun': noun,
-                        'verb': verb,
+                        'rel': rel,
+                        'noun': left,
+                        'verb': right,
                         'freq': freq,
                         'sig': round(sig, 1),
-                        'alternatives': _top_alternatives(noun, limit=5),
+                        'alternatives': _top_alternatives(rel, left, right, limit=5),
                     })
         s5 = min(s5, COLLOCATION_SCORE_MAX)
 
@@ -485,9 +572,16 @@ def extract_body_sentences(text: str) -> list:
             continue
         body_lines.append(stripped)
 
-    full_body = ' '.join(body_lines)
-    sentences = re.split(r'(?<=[.!?])\s+', full_body)
-    sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) >= 6]
+    # 줄 단위로 문장을 나눈다. 줄 안에 종결부호가 있으면 추가 분할하고,
+    # 종결부호가 없는 줄은 그 줄 전체를 한 문장으로 본다 — SNS 톤(마침표 생략,
+    # 줄바꿈이 문장부호를 대신)의 텍스트에서 여러 줄이 한 덩어리로 합쳐져
+    # 형태소 통계가 왜곡되던 문제 방지.
+    sentences = []
+    for line in body_lines:
+        for piece in re.split(r'(?<=[.!?…])\s+', line):
+            piece = piece.strip()
+            if piece and len(piece) >= 6:
+                sentences.append(piece)
     return sentences
 
 
@@ -554,9 +648,11 @@ def print_text_report(result: dict, top: int = 10):
             sample = r['matched'][:5]
             print(f'      매칭 패턴: {sample}')
         if r.get('awkward_collocations'):
+            rel_label = {'nv': '명사-용언', 'vn': '관형-명사', 'av': '부사-용언'}
             for c in r['awkward_collocations'][:3]:
                 alt_str = ', '.join(f"{a['verb']}({a['freq']}건)" for a in c['alternatives'][:3])
-                print(f'      어색 결합: ({c["noun"]}, {c["verb"]}) freq={c["freq"]} sig={c["sig"]}')
+                rel = rel_label.get(c.get('rel', 'nv'), c.get('rel'))
+                print(f'      어색 결합[{rel}]: ({c["noun"]}, {c["verb"]}) freq={c["freq"]} sig={c["sig"]}')
                 if alt_str:
                     print(f'        자연 대안: {alt_str}')
         print()
