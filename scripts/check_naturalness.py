@@ -352,21 +352,25 @@ def _lookup_collocation(rel, left, right):
     return (row['freq'], row['sig'])
 
 
-# 대안 동사 추천에서 제외할 기능성 용언. 어떤 명사와도 결합해 sig 상위를
-# 도배하지만("기업에 대하", "~를 위하") 윤문 대안으로는 정보 가치가 없다.
+# 연관어 목록에서 제외할 기능성 용언. 어떤 명사와도 결합해 sig 상위를
+# 도배하지만("기업에 대하", "~를 위하") 적발 근거 자료로는 정보 가치가 없다.
 FUNCTION_VERBS = frozenset([
     '있', '없', '하', '되', '대하', '위하', '통하', '따르', '관하', '의하',
     '인하', '비롯하', '같', '이러하', '그러하', '아니하', '못하', '말미암',
 ])
 
 
-def _top_alternatives(rel, left, right, limit=5):
-    """어색 결합의 자연 대안 상위 N개 (sig 기준).
+def _corpus_associations(rel, left, right, limit=5):
+    """적발된 결합의 축 단어가 코퍼스에서 자주 만난 연관어 상위 N개 (sig 기준).
+
+    문장을 보지 않는 단어 단위 빈도 통계라 문맥 비인지다. 대체 표현 후보가
+    아니라 "이 단어는 원래 이런 결합으로 쓰인다"는 적발 근거 자료이며,
+    수정 표현은 소비자(LLM)가 원문 의미를 기준으로 새로 짠다.
 
     nv: 그 명사(left)와 자주 결합하는 용언들.
     vn: 그 명사(right)를 자주 수식하는 관형 용언들 (예: 신뢰 → 두텁, 깊).
     av: 그 용언(right)과 자주 어울리는 부사들.
-    기능성 용언(FUNCTION_VERBS)은 걸러서 내용어만 추천한다.
+    기능성 용언(FUNCTION_VERBS)은 걸러서 내용어만 남긴다.
     """
     if _collocation_conn is None:
         return []
@@ -501,7 +505,7 @@ def naturalness_score(sentence: str) -> dict:
                     'verb': right,
                     'freq': 0,
                     'sig': 0.0,
-                    'alternatives': _top_alternatives(rel, left, right, limit=5),
+                    'corpus_associations': _corpus_associations(rel, left, right, limit=5),
                 })
             else:
                 freq, sig = result
@@ -514,7 +518,7 @@ def naturalness_score(sentence: str) -> dict:
                         'verb': right,
                         'freq': freq,
                         'sig': round(sig, 1),
-                        'alternatives': _top_alternatives(rel, left, right, limit=5),
+                        'corpus_associations': _corpus_associations(rel, left, right, limit=5),
                     })
         s5 = min(s5, COLLOCATION_SCORE_MAX)
 
@@ -612,7 +616,10 @@ def evaluate_file(file_path: str, threshold: int = 17) -> dict:
             '해당 명사의 의미를 직접(자기 지식, 필요시 웹검색) 확인하고 그 명사에 자연스러운 동사인지 '
             '같은 부류 명사의 연어로 판정하기 전에는 어떤 적발도 일축하지 마라. '
             '동사가 어긋나면 적절한 동사로 고치고, 자연스러우면 그 치환·의미 비교 근거를 한 줄 남겨라. '
-            '"코퍼스가 작아서/명사가 없어서 0" 단독 사유로는 일축 불가다.'
+            '"코퍼스가 작아서/명사가 없어서 0" 단독 사유로는 일축 불가다. '
+            'corpus_associations는 문맥을 보지 않은 단어 빈도 연관어다. 대체 표현 후보로 쓰지 말고 '
+            '적발 근거 확인용으로만 참고하며, 수정 문장은 문제 단어의 치환이 아니라 '
+            '원문이 전달하려는 의미 관계(누가 무엇을 하는지)를 기준으로 새로 작성하라.'
         ),
         'oov_nouns': all_oov,
         'suspects': suspects,
@@ -650,15 +657,13 @@ def print_text_report(result: dict, top: int = 10):
         if r.get('awkward_collocations'):
             rel_label = {'nv': '명사-용언', 'vn': '관형-명사', 'av': '부사-용언'}
             for c in r['awkward_collocations'][:3]:
-                alt_str = ', '.join(f"{a['verb']}({a['freq']}건)" for a in c['alternatives'][:3])
                 rel = rel_label.get(c.get('rel', 'nv'), c.get('rel'))
                 print(f'      어색 결합[{rel}]: ({c["noun"]}, {c["verb"]}) freq={c["freq"]} sig={c["sig"]}')
-                if alt_str:
-                    print(f'        자연 대안: {alt_str}')
         print()
 
     print(f'전체 결과: WARN ({result["suspect_count"]} / {result["total_sentences"]} 문장 의심)')
     print('  지침: 의심 문장을 자연스러운 한국어로 다듬은 뒤 다시 검사할 것.')
+    print('  지침: 어색 결합은 단어만 바꾸기보다 의미 관계(누가 무엇을 하는지)를 다시 세우는 수정을 우선 검토할 것.')
 
 
 def main():
