@@ -38,6 +38,14 @@ import re
 import sqlite3
 import sys
 
+# Windows 콘솔 기본 인코딩(cp949)에서는 텍스트 리포트의 일부 문자가 인코딩
+# 불가로 죽는다. 리다이렉트해도 stdout 인코딩이 cp949면 같으므로 여기서 UTF-8로
+# 고정한다(같은 프로젝트의 다른 검사기들과 동일한 처리).
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 try:
     from kiwipiepy import Kiwi
 except ImportError:
@@ -589,6 +597,151 @@ def extract_body_sentences(text: str) -> list:
     return sentences
 
 
+# ============================================================
+# 문서 레벨 패턴 (2.7.0)
+#
+# 시그널 1~5는 전부 문장 단위다. 그런데 실측에서 어휘 층위 번역투는 이미
+# 거의 0인 반면(이중피동·이중조사·have/make 직역·한자어 명사화 모두 0건),
+# 남은 어색함이 "문단 첫머리에 짧은 명사서술 선언을 놓고 뒤에 설명을 붙이는"
+# 문단 설계 층위에 몰려 있었다(실산출물 29문단 중 10건). 이 층위는 문장을
+# 아무리 따로 봐도 안 보인다.
+#
+# 임계값을 두지 않는다. 이 블록은 통과/실패를 판정하지 않고 관측값과 처방만
+# 싣는다. 판정 임계를 두려면 라벨셋이 필요한데 문단 구조에는 그것이 없고,
+# 근거 없는 임계는 "미달이니 통과"로 모델이 뭉개는 부작용이 더 크다.
+# 대신 0건이면 그 항목을 아예 싣지 않는 방식으로 발동을 통제한다.
+# ============================================================
+
+# 명사서술 종결 — "X는 Y입니다" 꼴로 끝나는 선언
+_NOUN_PREDICATE_END = re.compile(
+    r'(입니다|이었습니다|였습니다|이에요|예요|이네요|이다|였다|이었다)\s*[.!?…]?$')
+# 절 연결 어미 — 한 문장 안에서 절을 잇는 표지
+_CLAUSE_LINK = re.compile(
+    r'(는데|은데|인데|고요|면서|어서|아서|해서|지만|으나|니까|으니|다가|더니|려고|도록|거나)')
+# 종결부호로 끝나는지
+_TERMINATED = re.compile(r'[.!?…]\s*$')
+
+SHORT_LEAD_MAX_CHARS = 25        # 문단 첫 문장이 이보다 짧으면 '짧은 선언' 후보
+LONG_SENTENCE_MIN_CHARS = 100    # 장문 기준
+PUNCT_DENSITY_MIN = 0.5          # 종결부호 비율이 이 미만이면 장문 지표는 측정 불가로 침묵
+
+# [기각] 좌향 관형구 중첩(A-18 계열) — 2.7.0 도입 검토 중 실측으로 기각.
+# 한 문장의 관형형 전성어미(ETM)를 세는 방식은 실산출물 18편에서 28건을
+# 적발했으나 검토 결과 대부분이 정상 문장이었다. 서술어 경계(EC/EF) 없이
+# 연속된 ETM만 세도록 좁혀 7건까지 줄였는데, 남은 7건도 전부 자연스러웠다
+# ("운동회나 콘서트장처럼 줌을 많이 쓰는 곳에서 촬영하는 분들은 체감이 클
+# 수밖에 없어요"). 한국어는 head-final이라 관형절 중첩이 정상 문법이며,
+# 원 규칙의 근거는 영어 관계대명사절 직역이라 자생 한국어 산문에는 발동
+# 조건 자체가 성립하지 않는다. 재도입하려면 번역문 코퍼스로 먼저 검정할 것.
+
+
+def _split_prose_blocks(text: str) -> list:
+    """마크다운에서 산문 문단을 [[문장, ...], ...]로 추출.
+
+    extract_body_sentences()가 문장 단위 평가용으로 문단 경계를 버리는 것과
+    달리, 문서 레벨 패턴은 "문단의 첫 문장"을 봐야 하므로 경계를 보존한다.
+    불릿·표·헤딩·해시태그·인용은 제외한다 — 불릿은 원래 짧아서 포함시키면
+    '짧은 선언' 판정이 오염된다.
+    """
+    blocks, current = [], []
+    in_code = False
+    for line in text.split('\n'):
+        s = line.strip()
+        if s.startswith('```'):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        is_break = (not s or s == '---' or s.startswith('#') or s.startswith('|')
+                    or s.startswith('-') or s.startswith('*') or s.startswith('>')
+                    or re.match(r'^\d+[.)]\s', s))
+        if is_break:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append(s)
+    if current:
+        blocks.append(current)
+
+    out = []
+    for blk in blocks:
+        joined = ' '.join(blk)
+        sents = [p.strip() for p in re.split(r'(?<=[.!?…])\s+', joined) if p.strip()]
+        if sents:
+            out.append(sents)
+    return out
+
+
+def document_patterns(text: str) -> dict:
+    """문단 설계 층위 관측. 임계 판정 없음 — 관측된 것만 싣는다."""
+    blocks = _split_prose_blocks(text)
+    all_sents = [s for blk in blocks for s in blk]
+    if not all_sents:
+        return {'active': False, 'reason': '산문 문단 없음 (표·불릿·헤딩만으로 구성)'}
+
+    # --- 진단 1: 짧은 명사서술 선언 -------------------------------------
+    # 문단이 2문장 이상일 때의 첫 문장만 본다. 1문장 문단은 합칠 뒤 문장이
+    # 없으므로 처방이 성립하지 않는다.
+    lead_targets = [blk[0] for blk in blocks if len(blk) >= 2]
+    short_leads = [s for s in lead_targets
+                   if len(s) <= SHORT_LEAD_MAX_CHARS and _NOUN_PREDICATE_END.search(s)]
+
+    # --- 검증 지표 (처방 대상 아님) -------------------------------------
+    linked = [s for s in all_sents if _CLAUSE_LINK.search(s)]
+    terminated = sum(1 for s in all_sents if _TERMINATED.search(s))
+    punct_density = terminated / len(all_sents)
+    # SNS 톤은 마침표를 생략해 줄바꿈이 문장부호를 대신한다(tone 규칙). 그런
+    # 글에서는 한 줄이 통째로 한 문장으로 잡혀 장문 수치가 실제와 무관해진다.
+    # 장르를 추정하는 대신 "측정이 성립하는가"만 보고 침묵한다 — 오판해도
+    # 침묵할 뿐이라 안전하다.
+    long_measurable = punct_density >= PUNCT_DENSITY_MIN
+    longs = [s for s in all_sents if len(s) >= LONG_SENTENCE_MIN_CHARS]
+
+    diagnosis = []
+    if short_leads:
+        diagnosis.append({
+            'id': 'short_declarative_lead',
+            'observed': (f'문단 첫 문장이 짧은 명사서술 선언 {len(short_leads)}건 '
+                         f'/ 검사 대상 문단 {len(lead_targets)}개'),
+            'examples': short_leads[:5],
+            'prescription': (
+                '앞 문장의 정보를 뒤 문장 안으로 옮겨 한 문장으로 다시 써라. '
+                '옮길 자리는 주어·부사어·서술어 중 뜻이 맞는 곳이다. '
+                '정보를 빼지도 더하지도 않는다. '
+                '앞에 그대로 두고 연결어미만 붙이면 결론이 앞에 남아 더 어색해진다. '
+                '한국어는 핵심이 뒤에 오기 때문이다. '
+                '전부 없애지는 마라. 선언 구문 전멸은 과교정이다.'),
+            'confirm_by': ['sentence_count_after', 'clause_link_rate', 'long_sentence_count'],
+        })
+
+    return {
+        'active': True,
+        'paragraph_count': len(blocks),
+        'sentence_count': len(all_sents),
+        'diagnosis': diagnosis,
+        'confirm_only': {
+            'clause_link_rate': round(len(linked) / len(all_sents), 3),
+            'long_sentence_count': len(longs) if long_measurable else None,
+            'long_sentence_measurable': long_measurable,
+            'punctuation_density': round(punct_density, 3),
+            'note': (
+                '처방 대상이 아니다. 위 diagnosis를 적용한 뒤 이 값이 움직였는지 '
+                '확인하는 용도다. 이 수치를 직접 겨냥해 문장을 늘리면 수식어가 붙어 '
+                '정확히 피하려던 증상이 생긴다. '
+                'long_sentence_count가 null이면 종결부호 밀도가 낮아(SNS 톤 등) '
+                '문장 분리가 성립하지 않는 글이므로 이 지표는 측정하지 않았다.'),
+        },
+        'meaning': (
+            '문단 설계 층위의 관측이다. 문장 단위 시그널(suspects·review_band)이 '
+            '구조상 볼 수 없는 층위이며, 임계 판정이 아니라 이 글에서 실제로 관찰된 '
+            '것만 싣는다(0건이면 항목 자체가 없다). diagnosis 항목만 겨냥해 고치고 '
+            'confirm_only 값은 결과 확인용으로만 읽는다. 문장 하나씩 보지 말고 '
+            '문단을 통으로 읽어야 보이는 패턴이므로, suspects 처리와 별개의 '
+            '패스로 처리한다.'),
+    }
+
+
 def evaluate_file(file_path: str, threshold: int = 17) -> dict:
     """파일을 평가해 결과 dict 반환."""
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -626,6 +779,7 @@ def evaluate_file(file_path: str, threshold: int = 17) -> dict:
             '원문이 전달하려는 의미 관계(누가 무엇을 하는지)를 기준으로 새로 작성하라.'
         ),
         'oov_nouns': all_oov,
+        'document_patterns': document_patterns(text),
         'suspects': suspects,
         'review_band_count': len(review_band),
         'review_band': review_band,
@@ -656,6 +810,23 @@ def print_text_report(result: dict, top: int = 10):
     if result.get('oov_nouns'):
         print(f'  코퍼스 부재 명사(미검수 통과, 외부 검증 권장): {", ".join(result["oov_nouns"][:20])}')
     print()
+
+    dp = result.get('document_patterns', {})
+    if dp.get('active'):
+        co = dp['confirm_only']
+        print(f'문단 설계 관측 (문단 {dp["paragraph_count"]} / 문장 {dp["sentence_count"]}):')
+        if dp['diagnosis']:
+            for d in dp['diagnosis']:
+                print(f'  - [{d["id"]}] {d["observed"]}')
+                for ex in d.get('examples', [])[:3]:
+                    print(f'      · {ex}')
+                print(f'    처방: {d["prescription"]}')
+        else:
+            print('  - 관측된 문단 설계 패턴 없음')
+        lsc = co['long_sentence_count']
+        print(f'  검증 지표(겨냥 금지): 절 연결 {co["clause_link_rate"]:.0%} / '
+              f'100자+ 문장 {lsc if lsc is not None else "측정 불가(종결부호 밀도 낮음)"}')
+        print()
 
     if result['suspect_count'] == 0:
         print('전체 결과: OK (의심 문장 없음)')

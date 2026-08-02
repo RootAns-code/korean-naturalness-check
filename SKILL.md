@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.6.0
+version: 2.7.0
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -11,6 +11,8 @@ description: Use this skill whenever the user wants to evaluate the naturalness 
 LLM이 자기가 쓴 한국어 본문을 자기가 검수하면 자연스럽다고 판정하는 편향이 있습니다. 이 편향 때문에 매거진투, 번역투, AI투 같은 어색한 표현이 자체 검수에서 통과돼 사용자에게 그대로 전달되는 사례가 누적됐습니다.
 
 이 스킬은 형태소 분석기(`kiwipiepy`), 어색 어휘 사전, 그리고 한국어 자연 코퍼스(Leipzig kor_news_2022_1M) 기반 명사+동사 결합 빈도 룩업을 결합한 정량 검수 도구를 통해 LLM 자체 검수와 다른 분포의 외부 시그널을 제공합니다. 코퍼스 결합 빈도 룩업은 사전에 등록되지 않은 어색 표현(예: "기업을 묶다", "사례를 묶음으로")도 자동 검출합니다. 이 스킬의 책임은 의심 문장을 검출하고 권장 수정 방향을 제시하는 것까지입니다. 본문 자동 수정은 글 작성 스킬이나 사용자 후속 지시에서 처리합니다.
+
+2.7.0부터 **문단 설계 층위**의 관측(`document_patterns`)이 함께 나옵니다. 시그널 1~5는 전부 문장 단위라, 문장을 아무리 따로 봐도 안 보이는 어색함이 있습니다. 실산출물 18편 실측에서 어휘 층위 번역투(이중피동, 이중조사, have/make 직역, 한자어 명사화)는 이미 거의 0인 반면, 남은 어색함이 "문단 첫머리에 짧은 명사서술 선언을 놓고 뒤에 설명을 붙이는" 구조에 몰려 있었습니다(한 글에서 29문단 중 10건). 이 층위는 문단을 통으로 읽어야 보이므로 별도 패스로 처리합니다.
 
 <workflow>
 
@@ -146,6 +148,43 @@ python3 scripts/check_naturalness.py <파일 경로> --json
 
 2.6.0부터 이 재판단 밴드가 `review_band` 필드로 **항상 출력에 동봉**되고 처리 지시가 `review_band_meaning`에 실려 나갑니다. 이 SKILL.md를 읽지 않고 스크립트만 호출하는 파이프라인(다른 프로젝트의 글 작성 스킬 등)에서도 소비자 모델이 JSON만 읽고 이 구간을 처리하게 만들기 위한 설계입니다. 실제로 소비 스킬이 "suspects를 처리한다"라고만 적어 두어 12점 적발("추정이 모이다")이 미보고로 새고 사용자가 직접 잡아낸 사례가 배경입니다(2026-08-02). `--threshold 12`로 낮춰 실행하면 밴드가 suspects로 흡수되고 `review_band`는 비어 나옵니다.
 
+### `document_patterns` (2.7.0 신규) — 문단 설계 층위
+
+JSON 최상위에 다음 블록이 함께 나옵니다.
+
+```json
+"document_patterns": {
+  "active": true,
+  "paragraph_count": 29,
+  "sentence_count": 64,
+  "diagnosis": [
+    {
+      "id": "short_declarative_lead",
+      "observed": "문단 첫 문장이 짧은 명사서술 선언 6건 / 검사 대상 문단 27개",
+      "examples": ["방향이 완전히 무너진 건 수요일입니다.", "이 중 제일 아팠던 건 세 번째입니다."],
+      "prescription": "앞 문장의 정보를 뒤 문장 안으로 옮겨 한 문장으로 다시 써라. ...",
+      "confirm_by": ["sentence_count_after", "clause_link_rate", "long_sentence_count"]
+    }
+  ],
+  "confirm_only": {
+    "clause_link_rate": 0.2,
+    "long_sentence_count": 0,
+    "long_sentence_measurable": true,
+    "punctuation_density": 0.98,
+    "note": "처방 대상이 아니다. ..."
+  },
+  "meaning": "문단 설계 층위의 관측이다. ..."
+}
+```
+
+**임계값이 없습니다.** 통과/실패를 판정하지 않고 관측된 것만 싣습니다. 판정 임계를 두려면 라벨셋이 필요한데 문단 구조에는 그것이 없고, 근거 없는 임계는 "미달이니 통과"로 모델이 뭉개는 부작용이 더 큽니다. 대신 **0건이면 그 항목을 아예 싣지 않는 방식으로** 발동을 통제합니다. 그래서 `diagnosis`가 빈 배열이면 이 글에는 관측된 문단 설계 패턴이 없다는 뜻입니다.
+
+`diagnosis` 항목만 겨냥해 고칩니다. `confirm_only`는 처방 적용 후 값이 움직였는지 확인하는 용도이며 **직접 겨냥하면 안 됩니다** — "절 연결 비율을 올려라"는 지시는 절 경계 쉼표(다수 프로젝트에서 0건 필수)를 부르고, "장문을 만들어라"는 지시는 수식어를 붙여 문장을 늘리게 만들어 정확히 피하려던 증상을 만듭니다.
+
+`long_sentence_count`가 `null`이면 종결부호 밀도가 낮아(SNS 톤처럼 마침표를 생략하고 줄바꿈이 문장부호를 대신하는 글) 문장 분리가 성립하지 않으므로 측정하지 않았다는 뜻입니다. 장르를 추정하는 대신 측정 성립 여부만 보므로, 오판해도 침묵할 뿐입니다.
+
+`short_declarative_lead`는 **2문장 이상인 문단의 첫 문장만** 봅니다. 1문장 문단은 합칠 뒤 문장이 없어 처방이 성립하지 않기 때문입니다. 이 조건 덕분에 한 줄에 한 생각을 쓰는 SNS 글에서는 자연히 침묵합니다(실측 확인).
+
 `oov_nouns`(최상위·문장별)는 코퍼스에 아예 없어 시그널 5가 판정 불가로 침묵한 명사 목록입니다. 코퍼스 기준 시점(2022) 이후 신조어·고유명사가 주로 여기에 잡히며, 이 명사들의 결합은 **검사를 통과한 것이 아니라 검사를 받지 않은 것**입니다.
 
 `corpus_signal_active`가 `false`로 나오면 동봉 코퍼스 DB(`assets/kor_collocation.db`)가 누락된 환경입니다. 이 경우 시그널 5는 비활성이지만 1~4번 시그널은 정상 동작합니다. 사용자 보고 시 코퍼스 룩업 결과 없이 진행하면 됩니다.
@@ -171,10 +210,32 @@ JSON 결과를 가공해 한국어로 보고합니다. 정규식 패턴은 사�
 ### 의심 문장 2 (점수 40.0)
 > ...
 
+## 문단 설계 (document_patterns가 diagnosis를 실었을 때만)
+
+**[관측 내용]** — 예: 문단 첫 문장이 짧은 명사서술 선언 6건 / 27문단
+
+> [examples 중 2~3개]
+
+[처방을 한국어로 풀어 설명하고, 예시 하나를 실제로 고쳐 보여준다]
+
 수정 후 다시 평가받으시면 됩니다.
 ```
 
 </output_format>
+
+### 문단 설계 보고 원칙
+
+`document_patterns.diagnosis`가 비어 있으면 이 섹션 자체를 만들지 않습니다. 관측된 게 없다는 뜻이므로 "문단 설계는 양호합니다" 같은 문장도 쓰지 않습니다 — 검사하지 않은 것을 통과로 보고하는 셈이 됩니다.
+
+`short_declarative_lead`가 실렸을 때는 **고친 예시를 하나 이상 실제로 보여줍니다.** 처방 문구만 전달하면 소비자 모델이 "연결어미로 잇기"로 좁게 해석해 결론 선행이 그대로 남는 문장을 만듭니다. 변환은 세 유형이고, 앞 문장이 통째로 사라지는 경우가 더 많습니다.
+
+| 유형 | 원문 | 고친 문장 |
+|---|---|---|
+| 서술어로 이동 | 시작은 중국이었습니다. 상하이의 국영 기업이 DUV 노광 장비를 자체 개발해 양산에 들어갔다는 보도가 나왔고... | 상하이의 국영 기업이 DUV 노광 장비를 자체 개발해 양산에 들어갔다는 보도가 나오면서 **중국에서 시작됐습니다.** |
+| 부사어로 흡수 | 방향이 완전히 무너진 건 수요일입니다. 다우가 2.19% 빠지면서 4대 지수가 전부 내렸고... | **수요일에는** 다우가 2.19% 빠지면서 4대 지수가 전부 내렸고... |
+| 주어로 복원 | 목요일부터 시장을 되돌린 건 결국 실적이었습니다. | **목요일부터는 실적이** 시장을 되돌렸습니다. |
+
+셋 다 안 맞을 때만 연결어미로 잇습니다. 그리고 **전부 고치지 않습니다.** 선언 구문이 0이 되면 과교정이며, 문단이 무엇을 다루는지 알려주는 기능까지 사라집니다.
 
 ### 권장 수정 방향 작성 원칙
 
