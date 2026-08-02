@@ -54,6 +54,9 @@ python3 scripts/check_naturalness.py <마크다운 파일> --json
 
 현재 버전과 변경 이력은 [SKILL.md](SKILL.md) 프론트매터와 [CHANGELOG.md](CHANGELOG.md)를 참고하세요. [Semantic Versioning](https://semver.org/lang/ko/)을 따릅니다.
 
-## 라이선스 표기
+## 라이선스
 
-동봉 코퍼스 DB의 원천 데이터: [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de/en/download/Korean) — kor_news_2022_1M, CC BY 4.0
+- 코드 및 문서: [MIT License](LICENSE)
+- `assets/kor_collocation.db`: [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de/en/download/Korean)의 kor_news_2022_1M 코퍼스([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))에서 파생. 원문 100만 문장을 kiwipiepy로 형태소 분석해 관계별 결합 빈도 통계로 집계·변형함. 이 DB 파일 자체도 CC BY 4.0 조건으로 재배포됨.
+- 인용: Goldhahn, D., Eckart, T., Quasthoff, U. (2012). *Building Large Monolingual Dictionaries at the Leipzig Corpora Collection: From 100 to 200 Languages.* Proceedings of LREC 2012.
+- 런타임 의존성 [kiwipiepy](https://github.com/bab2min/kiwipiepy)(LGPL v3)는 이 저장소에 포함되지 않으며 사용자가 별도 설치합니다.
