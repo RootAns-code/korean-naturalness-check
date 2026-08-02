@@ -597,6 +597,10 @@ def evaluate_file(file_path: str, threshold: int = 17) -> dict:
     results = [naturalness_score(s) for s in sentences]
     suspects = [r for r in results if r['score'] >= threshold]
     suspects.sort(key=lambda r: -r['score'])
+    # 12점(단일 강신호)부터 임계 미만까지는 "통과"가 아니라 "미보고"다.
+    # 소비자 모델이 이 구간을 놓치지 않도록 별도 필드로 항상 내보낸다.
+    review_band = [r for r in results if 12 <= r['score'] < threshold]
+    review_band.sort(key=lambda r: -r['score'])
     avg = sum(r['score'] for r in results) / max(len(results), 1)
     all_oov = []
     for r in results:
@@ -623,6 +627,18 @@ def evaluate_file(file_path: str, threshold: int = 17) -> dict:
         ),
         'oov_nouns': all_oov,
         'suspects': suspects,
+        'review_band_count': len(review_band),
+        'review_band': review_band,
+        'review_band_meaning': (
+            'review_band는 12점 이상 임계 미만이라 suspects에서 빠진 문장이다. '
+            '임계 아래는 검사 통과가 아니라 미보고일 뿐이다. 이 결과를 소비하는 모델은 '
+            'suspects 처리 후 review_band를 반드시 훑는다. 한 글자 명사, 고유명사의 부분 문자열, '
+            'oov 명사 같은 파서 조각 적발을 제외하고 온전한 결합이나 어휘 패턴이 남는 문장만 '
+            '실제로 읽고 판정한다. suspects처럼 재작성을 강제하는 구간이 아니라 어색 여부를 '
+            '판정하는 구간이며 어색하면 고치고 자연스러우면 그대로 둔다. '
+            'oov_nouns가 낀 문장은 코퍼스 미검수 상태이므로 결합이 자연스러운지 자기 지식으로 '
+            '한 번 더 확인한다. suspects만 처리하고 끝내면 이 검사를 절반만 쓴 것이다.'
+        ),
         'all_results': results,
     }
 
@@ -632,6 +648,8 @@ def print_text_report(result: dict, top: int = 10):
     print('한국어 자연스러움 점검:')
     print(f'  검사 문장 수: {result["total_sentences"]}')
     print(f'  의심 문장 수: {result["suspect_count"]} (임계 점수 {result["threshold"]} 이상)')
+    if result.get('review_band_count'):
+        print(f'  재판단 밴드: {result["review_band_count"]}문장 (12점 이상 임계 미만 — 미보고일 뿐 통과가 아니므로 suspects 처리 후 반드시 판정)')
     print(f'  평균 점수: {result["average_score"]} (낮을수록 자연)')
     print(f'  코퍼스 시그널: {"활성" if result["corpus_signal_active"] else "비활성 (assets/kor_collocation.db 미동봉)"}')
     print(f'  해석 규칙: {result["signal_meaning"]}')

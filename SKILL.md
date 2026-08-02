@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.5.0
+version: 2.6.0
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -131,6 +131,9 @@ python3 scripts/check_naturalness.py <파일 경로> --json
       "oov_nouns": []
     }
   ],
+  "review_band_count": 2,
+  "review_band": [...],
+  "review_band_meaning": "12점 이상 임계 미만 문장. 임계 아래는 통과가 아니라 미보고이므로 suspects 처리 후 반드시 훑어 판정하라는 소비자 지시 (전문은 실제 출력 참조)",
   "all_results": [...]
 }
 ```
@@ -140,6 +143,8 @@ python3 scripts/check_naturalness.py <파일 경로> --json
 `corpus_associations`(2.5.0에서 `alternatives`를 개명)는 적발된 결합의 축 단어가 코퍼스에서 자주 만난 연관어입니다 — nv면 그 명사의 잦은 용언, vn이면 그 명사의 잦은 수식어, av면 그 용언의 잦은 부사. **문장을 보지 않는 단어 단위 빈도 통계라 문맥 비인지이며, 대체 표현 후보가 아닙니다.** "기업이 묶이다" 적발에 거듭나/늘이 나오는 것처럼 원문 의미와 무관한 단어가 상위에 올 수 있습니다. 이 필드는 "이 단어는 원래 이런 결합으로 쓰인다"는 적발 근거 확인용으로만 참고하고, 사용자 보고에는 기본적으로 노출하지 않습니다.
 
 **단일 수식 적발(12점)은 기본 임계(17)를 넘지 않습니다** — 코퍼스 0건의 모호성(어색 vs 자연이지만 미수록) 판정을 LLM에 위임하는 설계입니다. 파이프라인 소비자는 `--threshold 12`로 실행해 12~16점 구간 중 vn/av 결합이 있는 문장을 재판단 밴드로 처리하는 것을 권합니다.
+
+2.6.0부터 이 재판단 밴드가 `review_band` 필드로 **항상 출력에 동봉**되고 처리 지시가 `review_band_meaning`에 실려 나갑니다. 이 SKILL.md를 읽지 않고 스크립트만 호출하는 파이프라인(다른 프로젝트의 글 작성 스킬 등)에서도 소비자 모델이 JSON만 읽고 이 구간을 처리하게 만들기 위한 설계입니다. 실제로 소비 스킬이 "suspects를 처리한다"라고만 적어 두어 12점 적발("추정이 모이다")이 미보고로 새고 사용자가 직접 잡아낸 사례가 배경입니다(2026-08-02). `--threshold 12`로 낮춰 실행하면 밴드가 suspects로 흡수되고 `review_band`는 비어 나옵니다.
 
 `oov_nouns`(최상위·문장별)는 코퍼스에 아예 없어 시그널 5가 판정 불가로 침묵한 명사 목록입니다. 코퍼스 기준 시점(2022) 이후 신조어·고유명사가 주로 여기에 잡히며, 이 명사들의 결합은 **검사를 통과한 것이 아니라 검사를 받지 않은 것**입니다.
 
