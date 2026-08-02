@@ -612,9 +612,9 @@ def extract_body_sentences(text: str) -> list:
 # 대신 0건이면 그 항목을 아예 싣지 않는 방식으로 발동을 통제한다.
 # ============================================================
 
-# 명사서술 종결 — "X는 Y입니다" 꼴로 끝나는 선언
-_NOUN_PREDICATE_END = re.compile(
-    r'(입니다|이었습니다|였습니다|이에요|예요|이네요|이다|였다|이었다)\s*[.!?…]?$')
+# 1인칭 시작 — 문단을 "저는/저도/제가"로 여는 것은 tone.md가 권장하는 화자
+# 노출이다. 길이가 짧아도 대상이 아니므로 제외한다.
+_FIRST_PERSON_LEAD = re.compile(r'^(저는|저도|저만|제가|저희|나는|나도|내가)\b|^(저|나)[는도가]\s')
 # 절 연결 어미 — 한 문장 안에서 절을 잇는 표지
 _CLAUSE_LINK = re.compile(
     r'(는데|은데|인데|고요|면서|어서|아서|해서|지만|으나|니까|으니|다가|더니|려고|도록|거나)')
@@ -680,12 +680,61 @@ def document_patterns(text: str) -> dict:
     if not all_sents:
         return {'active': False, 'reason': '산문 문단 없음 (표·불릿·헤딩만으로 구성)'}
 
-    # --- 진단 1: 짧은 명사서술 선언 -------------------------------------
+    # --- 진단 1: 짧은 선언으로 문단 열기 --------------------------------
     # 문단이 2문장 이상일 때의 첫 문장만 본다. 1문장 문단은 합칠 뒤 문장이
     # 없으므로 처방이 성립하지 않는다.
+    #
+    # 길이만 본다. 2.7.0 최초 구현은 "명사서술 종결(~입니다/예요)"을 함께
+    # 요구했는데, 실측에서 그 조건이 같은 병의 3분의 2를 놓쳤다(18편에서
+    # 명사서술 25건 vs 그 외 44건). "결과는 러셀 2000에 나타났습니다",
+    # "아마존은 방식이 달랐습니다"처럼 동사·형용사로 끝나는 선언이 전부
+    # 샜다. 문제는 서술어의 모양이 아니라 그 문장이 정보를 담지 않고 뒤
+    # 문장을 예고만 한다는 것이므로, 종결 형태는 애초에 틀린 축이었다.
+    # (원 규칙인 im-not-ai C-4에도 종결 조건은 없다. 그쪽은 정량 지표
+    # 자체가 없고 진단 LLM에게만 맡긴다.)
+    #
+    # 길이는 원인이 아니라 상관 지표다. 26자 이상에도 같은 구조가 있고
+    # ("목요일부터 시장을 되돌린 건 결국 실적이었습니다" 27자, "매출만큼
+    # 크게 먹힌 건 ~라는 점입니다" 58자), 반대로 짧아도 정상인 문장이 있다.
+    # 구조를 정규식으로 잡으려 했으나 관형형 어미가 ㄴ 받침으로 융합되는
+    # 경우(되돌린·무너진)를 문자 매칭으로 놓치고 오탐도 끼어 기각했다.
+    #
+    # 그래서 코드는 대상을 판정하지 않고 **판정 단위만 만든다**. 문단마다
+    # 인접 문장 2개씩 창을 밀어 쌍을 만들고, 각 쌍이 "예고 → 설명"인지는
+    # 스킬 4단계에서 모델이 판정한다. 첫 문장에 한정하면 문단 중간에 있는
+    # 같은 관계를 놓치므로(실측: "낙관 쪽 근거는 반도체에 있습니다 / ... /
+    # AI 인프라 주문이 ~라는 게 이유입니다"의 3번째 문장) 모든 인접 쌍을
+    # 대상으로 한다. 쌍을 명시적으로 열거하는 이유는 "문단을 읽어라"라는
+    # 지시만으로는 모델이 눈에 띄는 몇 개만 집고 넘어가기 때문이다.
     lead_targets = [blk[0] for blk in blocks if len(blk) >= 2]
     short_leads = [s for s in lead_targets
-                   if len(s) <= SHORT_LEAD_MAX_CHARS and _NOUN_PREDICATE_END.search(s)]
+                   if len(s) <= SHORT_LEAD_MAX_CHARS and not _FIRST_PERSON_LEAD.match(s)]
+
+    pairs = []
+    for bi, blk in enumerate(blocks, 1):
+        for si in range(len(blk) - 1):
+            pairs.append({
+                'paragraph': bi,
+                'position': f'{si + 1}-{si + 2}',
+                'lead': blk[si],
+                'lead_chars': len(blk[si]),
+                'follow': blk[si + 1],
+                'first_person_lead': bool(_FIRST_PERSON_LEAD.match(blk[si])),
+            })
+
+    # 문단 마지막 문장은 쌍의 follow 자리에만 놓여 lead로 한 번도 판정받지
+    # 않는다(문단당 1개씩 구조적 누락). 그런데 분열문 같은 구문 문제는 쌍
+    # 관계를 보지 않고 문장 하나로 판정되므로, 마지막 문장을 따로 모아
+    # 구문 검사에 넘긴다. n문장 문단은 쌍 n-1개의 lead가 1~n-1번째를 덮고
+    # tail이 n번째를 덮으므로, 둘을 합치면 전 문장이 한 번씩 검사된다.
+    # 1문장 문단(solo)도 여기로 들어온다 — 쌍이 없어 통째로 빠지던 자리다.
+    tails = [{
+        'paragraph': bi,
+        'position': f'{len(blk)}/{len(blk)}',
+        'text': blk[-1],
+        'chars': len(blk[-1]),
+        'solo': len(blk) == 1,
+    } for bi, blk in enumerate(blocks, 1)]
 
     # --- 검증 지표 (처방 대상 아님) -------------------------------------
     linked = [s for s in all_sents if _CLAUSE_LINK.search(s)]
@@ -698,47 +747,113 @@ def document_patterns(text: str) -> dict:
     long_measurable = punct_density >= PUNCT_DENSITY_MIN
     longs = [s for s in all_sents if len(s) >= LONG_SENTENCE_MIN_CHARS]
 
-    diagnosis = []
-    if short_leads:
-        diagnosis.append({
-            'id': 'short_declarative_lead',
-            'observed': (f'문단 첫 문장이 짧은 명사서술 선언 {len(short_leads)}건 '
-                         f'/ 검사 대상 문단 {len(lead_targets)}개'),
-            'examples': short_leads[:5],
-            'prescription': (
-                '앞 문장의 정보를 뒤 문장 안으로 옮겨 한 문장으로 다시 써라. '
-                '옮길 자리는 주어·부사어·서술어 중 뜻이 맞는 곳이다. '
-                '정보를 빼지도 더하지도 않는다. '
-                '앞에 그대로 두고 연결어미만 붙이면 결론이 앞에 남아 더 어색해진다. '
-                '한국어는 핵심이 뒤에 오기 때문이다. '
-                '전부 없애지는 마라. 선언 구문 전멸은 과교정이다.'),
-            'confirm_by': ['sentence_count_after', 'clause_link_rate', 'long_sentence_count'],
-        })
-
     return {
         'active': True,
         'paragraph_count': len(blocks),
         'sentence_count': len(all_sents),
-        'diagnosis': diagnosis,
+        'measured': {
+            'lead_total': len(lead_targets),
+            'short_lead_count': len(short_leads),
+            'short_lead_ratio': (round(len(short_leads) / len(lead_targets), 3)
+                                 if lead_targets else 0.0),
+            'pair_count': len(pairs),
+            'note': (
+                f'{SHORT_LEAD_MAX_CHARS}자 이하로 문단을 여는 비율은 심각도 참고용 통계이지 '
+                '대상 목록이 아니다. 실측 기준선은 문제로 지적된 글 0.48, '
+                '사람이 직접 손본 글 0.16이었다. 길이는 원인이 아니라 상관 지표이므로 '
+                '이 수치로 대상을 고르지 마라.'),
+        },
+        'sentence_pairs': pairs,
+        'tail_sentences': tails,
+        'review_required': [
+            {
+                'id': 'pair_relation',
+                'unit': 'sentence_pairs',
+                'target': '앞 문장이 뒤 문장을 예고만 하고 끝나는 인접 쌍 (문장 사이의 관계)',
+                'scope': ('sentence_pairs 전체를 하나씩 순회한다. 문단 첫 문장에 한정하지 마라. '
+                          '실측에서 문단 3번째 문장에도 같은 관계가 있었다.'),
+                'test': (
+                    'lead를 지웠다고 가정하고 follow만 읽어라. '
+                    '(a) follow만으로 정보가 온전하면 lead는 예고다 → 대상. '
+                    '(b) lead에만 있던 수치·날짜·고유명사·사실이 사라지면 독립 정보다 → 대상 아님. '
+                    '(c) 사라지는 것이 주어뿐이면 그 주어를 follow 안에 넣어 합칠 수 있다 → 대상. '
+                    'first_person_lead가 true인 쌍은 제외한다 — 화자 노출은 문체 규칙이 권장한다.'),
+                'prescription': (
+                    '대상으로 판정한 쌍만 고친다. '
+                    'lead의 정보를 follow 안으로 옮겨 한 문장으로 다시 써라. '
+                    '옮길 자리는 주어·부사어·서술어 중 뜻이 맞는 곳이다. '
+                    '정보를 빼지도 더하지도 않는다. '
+                    'lead를 앞에 그대로 두고 연결어미만 붙이면 결론이 앞에 남아 더 어색해진다. '
+                    '한국어는 핵심이 뒤에 오기 때문이다. '
+                    '전부 없애지는 마라. 선언 전멸은 과교정이며, '
+                    '문단이 무엇을 다루는지 알려주는 기능까지 사라진다.'),
+                'reporting': (
+                    '판정 결과를 쌍 단위로 남겨라. 대상이 아니라고 본 쌍도 위 test의 '
+                    '어느 갈래에 해당하는지 한 줄로 적는다. 대상만 골라 보고하면 '
+                    '순회를 건너뛴 것과 구분되지 않는다.'),
+            },
+            {
+                'id': 'cleft_structure',
+                'unit': 'sentence_pairs[].lead + tail_sentences[].text',
+                'target': '문장 하나로 판정되는 쪼개진 구문 (문장 내부의 구조)',
+                'scope': (
+                    'pair_relation과 독립된 검사다. 관계가 아니라 구문을 보므로 '
+                    '삭제 테스트에서 (b) 대상 아님으로 판정한 문장도 여기서는 대상일 수 있다 '
+                    '(실측: "목요일부터 시장을 되돌린 건 결국 실적이었습니다"는 수치가 사라져 '
+                    '(b)지만 분열문이다). '
+                    'sentence_pairs의 lead와 tail_sentences를 합치면 전 문장이 한 번씩 '
+                    '검사된다 — n문장 문단은 lead가 1~n-1번째, tail이 n번째를 덮는다. '
+                    'tail을 빠뜨리면 문단마다 마지막 한 문장이 통째로 검사에서 빠진다.'),
+                'test': (
+                    '되돌리기 테스트: "~한 건/것은 X이다"를 "X가 ~했다"로 바꿔 본다. '
+                    '뜻이 같고 더 단순해지면 분열문이다 '
+                    '("방향이 완전히 무너진 건 수요일입니다" → "수요일에 방향이 완전히 무너졌습니다"). '
+                    '되돌렸을 때 뜻이 달라지거나 어색해지면 그 강조가 필요한 자리이므로 그대로 둔다.'),
+                'signatures': [
+                    '분열문 "~한 건/것은/게 X이다" (예: 이 중 제일 아팠던 건 세 번째입니다)',
+                    '추상명사 주어 "시작·결과·이유·근거·차이·문제·숫자·기준은 X이다" '
+                    '(예: 결과는 러셀 2000에 나타났습니다)',
+                    '대조 선언 "X는 반대였다/달랐다/비슷하다" (예: 아마존은 방식이 달랐습니다)',
+                ],
+                'prescription': (
+                    '문장을 합치지 말고 구문만 푼다. 분열문은 기본 어순으로 되돌리고'
+                    '("목요일부터 시장을 되돌린 건 결국 실적이었습니다" → '
+                    '"목요일부터는 실적이 시장을 되돌렸습니다"), '
+                    '추상명사 주어는 그 명사가 지고 있던 뜻을 서술어로 옮긴다. '
+                    'pair_relation에서도 대상으로 판정된 문장이면 합치기를 적용하고 '
+                    '이 항목을 중복 적용하지 않는다. '
+                    '한국어에도 있는 정상 구문이므로 전부 풀지 마라. '
+                    '문서에 한두 번 남는 것은 강조로 기능한다.'),
+                'reporting': (
+                    '분열문으로 판정한 문장은 되돌린 문장을 함께 적는다. '
+                    '되돌려 보지 않고 "자연스럽다"로 넘기지 않는다.'),
+            },
+        ],
+        'review_note': (
+            '두 검사는 독립이며 판정 단위도 다르다. pair_relation은 문장 사이의 관계를, '
+            'cleft_structure는 문장 내부의 구문을 본다. 한 문장이 양쪽 모두에 걸릴 수 있고, '
+            '그때는 합치기(pair_relation)만 적용하면 구문도 함께 풀린다. '
+            '이 판정들은 코드가 대신할 수 없다 — 명사서술 종결·구조 정규식·길이 임계를 '
+            '차례로 시도해 모두 실패했다. 코드는 판정 단위를 만드는 데까지만 관여한다.'),
+        'confirm_by': ['sentence_count_after', 'clause_link_rate', 'long_sentence_count'],
         'confirm_only': {
             'clause_link_rate': round(len(linked) / len(all_sents), 3),
             'long_sentence_count': len(longs) if long_measurable else None,
             'long_sentence_measurable': long_measurable,
             'punctuation_density': round(punct_density, 3),
             'note': (
-                '처방 대상이 아니다. 위 diagnosis를 적용한 뒤 이 값이 움직였는지 '
+                '처방 대상이 아니다. review_required의 처방을 적용한 뒤 이 값이 움직였는지 '
                 '확인하는 용도다. 이 수치를 직접 겨냥해 문장을 늘리면 수식어가 붙어 '
                 '정확히 피하려던 증상이 생긴다. '
                 'long_sentence_count가 null이면 종결부호 밀도가 낮아(SNS 톤 등) '
                 '문장 분리가 성립하지 않는 글이므로 이 지표는 측정하지 않았다.'),
         },
         'meaning': (
-            '문단 설계 층위의 관측이다. 문장 단위 시그널(suspects·review_band)이 '
-            '구조상 볼 수 없는 층위이며, 임계 판정이 아니라 이 글에서 실제로 관찰된 '
-            '것만 싣는다(0건이면 항목 자체가 없다). diagnosis 항목만 겨냥해 고치고 '
-            'confirm_only 값은 결과 확인용으로만 읽는다. 문장 하나씩 보지 말고 '
-            '문단을 통으로 읽어야 보이는 패턴이므로, suspects 처리와 별개의 '
-            '패스로 처리한다.'),
+            '문단 설계 층위다. 문장 단위 시그널(suspects·review_band)이 구조상 볼 수 '
+            '없으며, suspects 처리와 별개의 패스로 처리한다. '
+            '이 블록에는 임계도 적발 목록도 없다. measured는 심각도 참고용 통계이고, '
+            '실제 판정은 review_required의 두 검사를 모델이 수행한다. '
+            'confirm_only는 수정 후 확인용이며 직접 겨냥하지 않는다.'),
     }
 
 
@@ -813,19 +928,34 @@ def print_text_report(result: dict, top: int = 10):
 
     dp = result.get('document_patterns', {})
     if dp.get('active'):
-        co = dp['confirm_only']
-        print(f'문단 설계 관측 (문단 {dp["paragraph_count"]} / 문장 {dp["sentence_count"]}):')
-        if dp['diagnosis']:
-            for d in dp['diagnosis']:
-                print(f'  - [{d["id"]}] {d["observed"]}')
-                for ex in d.get('examples', [])[:3]:
-                    print(f'      · {ex}')
-                print(f'    처방: {d["prescription"]}')
-        else:
-            print('  - 관측된 문단 설계 패턴 없음')
+        co, me = dp['confirm_only'], dp['measured']
+        print(f'문단 설계 (문단 {dp["paragraph_count"]} / 문장 {dp["sentence_count"]}):')
+        print(f'  통계(참고용): {SHORT_LEAD_MAX_CHARS}자 이하로 여는 문단 '
+              f'{me["short_lead_count"]}/{me["lead_total"]} ({me["short_lead_ratio"]:.0%}) '
+              f'— 지적된 글 48% / 잘 쓴 글 16%가 실측 기준선')
         lsc = co['long_sentence_count']
         print(f'  검증 지표(겨냥 금지): 절 연결 {co["clause_link_rate"]:.0%} / '
               f'100자+ 문장 {lsc if lsc is not None else "측정 불가(종결부호 밀도 낮음)"}')
+        pairs = dp.get('sentence_pairs', [])
+        tails = dp.get('tail_sentences', [])
+        rr = {r['id']: r for r in dp.get('review_required', [])}
+        if pairs:
+            print(f'  [검사1 관계] 인접 쌍 {len(pairs)}개 — 코드는 여기까지다. '
+                  f'아래를 하나씩 판정할 것:')
+            print(f'    테스트: {rr["pair_relation"]["test"]}')
+            for p in pairs:
+                fp = ' [1인칭 제외]' if p['first_person_lead'] else ''
+                print(f'    문단{p["paragraph"]} {p["position"]}{fp}')
+                print(f'      lead   ({p["lead_chars"]:>3}자) {p["lead"][:68]}')
+                print(f'      follow        {p["follow"][:68]}')
+        if tails:
+            print(f'  [검사2 구문] 문단 마지막 문장 {len(tails)}개 '
+                  f'(쌍에서 lead로 나오지 않는 자리. 검사1의 lead와 합치면 전 문장 커버):')
+            print(f'    테스트: {rr["cleft_structure"]["test"]}')
+            for t in tails:
+                solo = ' [1문장 문단]' if t['solo'] else ''
+                print(f'    문단{t["paragraph"]} {t["position"]}{solo} '
+                      f'({t["chars"]:>3}자) {t["text"][:66]}')
         print()
 
     if result['suspect_count'] == 0:
