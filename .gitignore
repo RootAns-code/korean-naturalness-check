@@ -3,3 +3,6 @@ scripts/_build_work/
 
 __pycache__/
 *.pyc
+
+# 편집 전 로컬 백업
+*.bak

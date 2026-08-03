@@ -549,6 +549,33 @@ def naturalness_score(sentence: str) -> dict:
     }
 
 
+_BULLET = re.compile(r'^[-*+]\s')
+
+# 인라인 마크업 — 벗기지 않으면 두 곳이 깨진다.
+#   1) 문장 분할: "**문장.** 다음 문장."에서 마침표 다음이 공백이 아니라
+#      분할 정규식이 안 걸리고 두 문장이 한 덩어리가 된다(실측 20.0점 1문장
+#      vs 정리 후 12.0점). 게다가 줄이 '*'로 시작해 불릿으로도 오인된다.
+#   2) 명사 밀도(s1): 백틱이 토큰 수를 늘려 밀도를 희석해 점수가 내려간다
+#      (실측 27.2 → 20.0). 내려가는 방향이라 어색한 문장을 놓친다.
+# 볼드·링크는 kiwi가 기호로 처리해 명사 목록이 바뀌지 않지만, 문장 분할을
+# 위해 함께 벗긴다.
+_MD_INLINE = [
+    (re.compile(r'!?\[([^\]]*)\]\([^)]*\)'), r'\1'),   # 링크·이미지 → 표시 텍스트만
+    (re.compile(r'`([^`]+)`'), r'\1'),                 # 인라인 코드
+    (re.compile(r'\*\*([^*]+)\*\*'), r'\1'),           # 볼드
+    (re.compile(r'__([^_]+)__'), r'\1'),               # 볼드(언더스코어)
+    (re.compile(r'~~([^~]+)~~'), r'\1'),               # 취소선
+    (re.compile(r'(?<![\*\w])\*([^\s*][^*]*?)\*(?!\*)'), r'\1'),  # 이탤릭
+]
+
+
+def _strip_inline_markdown(line: str) -> str:
+    """인라인 마크업을 벗겨 본문 텍스트만 남긴다."""
+    for pat, rep in _MD_INLINE:
+        line = pat.sub(rep, line)
+    return line
+
+
 def extract_body_sentences(text: str) -> list:
     """마크다운 텍스트에서 평가 대상 문장 리스트 추출.
 
@@ -572,11 +599,15 @@ def extract_body_sentences(text: str) -> list:
             continue
         if stripped.startswith('|'):
             continue
-        if stripped.startswith('-') or stripped.startswith('*'):
+        stripped = _strip_inline_markdown(stripped)
+        if _BULLET.match(stripped):
+            # 불릿 표지는 뒤에 공백이 올 때만이다. "**강조 문장**"이나
+            # "-5%는 하락입니다" 같은 본문 줄을 불릿으로 오인하면 표지를
+            # 벗기면서 문장이 깨진다.
             # 블로그 초안은 불릿 안에 완결 문장이 많다. 문장 종결형(마침표 또는
             # 다/요/죠 어미)으로 끝나는 불릿만 평가에 포함하고, 명사 나열이나
             # "가격: 12,000원" 같은 항목 표기는 형태소 통계가 왜곡되므로 제외.
-            item = stripped.lstrip('-* ').strip()
+            item = _BULLET.sub('', stripped).strip()
             if len(item) >= 6 and re.search(r'(?:[.!?…]|[다요죠])\s*$', item):
                 if not re.search(r'[.!?…]$', item):
                     item += '.'
