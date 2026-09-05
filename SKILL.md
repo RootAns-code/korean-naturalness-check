@@ -1,6 +1,6 @@
 ---
 name: korean-naturalness-check
-version: 2.8.1
+version: 2.8.2
 description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
@@ -24,6 +24,8 @@ LLM이 자기가 쓴 한국어 본문을 자기가 검수하면 자연스럽다�
 2단계 의존성 확인: `kiwipiepy` 설치 여부 확인
 3단계 검수 스크립트 실행: `scripts/check_naturalness.py --json`
 4단계 사용자 보고: JSON 결과를 가공해 한국어 보고 + `sentence_pairs` 순회 판정
+
+코드가 출력한 JSON에는 모델의 판정과 수정안이 들어 있지 않습니다. 모델이 `review_required`를 수행한 결과는 별도 보고로 작성합니다. 호출 프로젝트는 이 보고를 받아 본문에 반영하며 판정 기준을 따로 복제하지 않습니다.
 
 각 단계는 이전 단계 결과 위에 쌓이므로 순서대로 진행합니다. 4단계는 두 패스입니다. 문장 단위 적발(`suspects` → `review_band`)을 처리한 뒤, 문단 설계(`sentence_pairs` 순회)를 별도로 처리합니다. 앞 패스는 스크립트가 검출한 것을 가공하는 일이고, 뒤 패스는 스크립트가 만든 판정 단위를 모델이 직접 판정하는 일이라 성격이 다릅니다.
 
@@ -207,8 +209,8 @@ JSON 최상위에 다음 블록이 함께 나옵니다.
   ],
   "review_required": [
     {"id": "pair_relation", "unit": "sentence_pairs",
-     "target": "앞 문장이 뒤 문장을 예고만 하고 끝나는 인접 쌍 (문장 사이의 관계)",
-     "test": "lead를 지웠다고 가정하고 follow만 읽어라. ...",
+     "target": "예고 또는 선언 뒤에 설명을 분리한 인접 쌍 (문장 사이의 관계)",
+     "test": "삭제 검사 뒤에도 문장 관계를 확인하고 정보 보존 재구성문을 비교하라. ...",
      "prescription": "lead의 정보를 follow 안으로 옮겨 한 문장으로 다시 써라. ..."},
     {"id": "cleft_structure", "unit": "sentence_pairs[].lead + tail_sentences[].text",
      "target": "문장 하나로 판정되는 쪼개진 구문 (문장 내부의 구조)",
@@ -237,24 +239,22 @@ JSON 최상위에 다음 블록이 함께 나옵니다.
 
 | | 검사1 `pair_relation` | 검사2 `cleft_structure` |
 |---|---|---|
-| 본다 | 앞 문장이 뒤 문장을 예고만 하는가 | 이 문장이 쪼개진 구문인가 |
+| 본다 | 예고 또는 선언과 설명을 불필요하게 분리했는가 | 이 문장이 쪼개진 구문인가 |
 | 단위 | 인접 쌍 | 문장 하나 |
-| 테스트 | `lead`를 지우고 `follow`만 읽기 | `~한 건 X이다`를 `X가 ~했다`로 되돌리기 |
+| 테스트 | 삭제 검사 후 정보 보존 재구성문 비교 | `~한 건 X이다`를 `X가 ~했다`로 되돌리기 |
 | 처방 | 합치기 | 구문만 풀기(문장은 유지) |
 
-**한 문장이 양쪽에 걸릴 수 있습니다.** 그때는 합치기만 적용하면 구문도 함께 풀립니다. 반대로 검사1이 (b) "대상 아님"으로 판정한 문장이 검사2에서는 대상일 수 있습니다 — "목요일부터 시장을 되돌린 건 결국 실적이었습니다"는 지우면 정보가 사라지지만(b) 분열문입니다.
+**한 문장이 양쪽에 걸릴 수 있습니다.** 그때는 합치기만 적용하면 구문도 함께 풀립니다. 반대로 검사1에서 유지한 문장이 검사2에서는 대상일 수 있습니다 — "목요일부터 시장을 되돌린 건 결국 실적이었습니다"는 지우면 정보가 사라지지만 분열문입니다.
 
 ### 판정 테스트
 
-`lead`를 지웠다고 가정하고 `follow`만 읽습니다.
+판정 절차의 기준은 JSON의 `document_patterns.review_required`다. 각 항목의 `test`, `prescription`, `reporting`을 끝까지 수행한다. `pair_relation`은 삭제 검사와 재구성 비교를 모두 요구한다. 삭제하면 정보가 사라진다는 결과는 문장 구조를 유지할 근거가 아니다.
 
-| 결과 | 판정 |
-|---|---|
-| `follow`만으로 정보가 온전함 | `lead`는 예고 → **대상** |
-| `lead`에만 있던 수치·날짜·고유명사·사실이 사라짐 | 독립 정보 → 대상 아님 |
-| 사라지는 것이 주어뿐임 | 그 주어를 `follow`에 넣어 합칠 수 있음 → **대상** |
+예를 들어 “이 요금제를 유지하고 있습니다. 작업을 잘게 나누면 한도가 부족하지 않기 때문입니다.”는 어느 문장을 지워도 정보가 사라진다. 그래도 “작업을 잘게 나누면 한도가 부족하지 않아서 이 요금제를 유지하고 있습니다.”처럼 원인과 결론을 연결한 대안을 작성해 비교한다.
 
-`first_person_lead`가 `true`인 쌍은 제외합니다. `tone.md`가 권장하는 화자 노출이기 때문입니다.
+“세션이 초기화돼도 주간 사용량은 계속 누적됩니다. 주간 한도는 계정에 정해진 요일과 시간에 초기화됩니다.”도 “주간 사용량은 세션 한도가 초기화된 뒤에도 계속 누적되다가 계정에 정해진 요일과 시간에 초기화됩니다.”로 정보를 보존할 수 있다.
+
+재구성하면서 인과관계를 새로 만들거나 사실, 조건, 확실성, 화자를 바꾸지 않는다. “요금은 100달러입니다. 모바일 결제 금액은 다를 수 있습니다.”처럼 독립된 안내는 억지로 인과문으로 바꾸지 않는다. 합치면 과도하게 길어지거나 문맥상 결론을 먼저 강조할 필요가 있으면 비교 근거를 남기고 원문을 유지한다. 문단 경계에 걸친 쌍은 추가하지 않는다.
 
 `measured.short_lead_ratio`는 대상 선별에 쓰지 않습니다. 길이는 원인이 아니라 상관 지표이며, 이 값은 "이 글이 얼마나 심한가"의 참고선입니다. 기준선은 문제로 지적된 글 0.48, 사람이 직접 손본 글 0.16입니다.
 
@@ -343,9 +343,7 @@ JSON 결과를 가공해 한국어로 보고합니다. 정규식 패턴은 사�
 
 **단위 전체를 순회합니다.** 눈에 띄는 몇 개만 집으면 안 됩니다. `measured.short_lead_ratio`가 낮아도 순회는 그대로 합니다 — 그 값은 심각도 참고선이지 필터가 아닙니다.
 
-**판정 결과를 쌍 단위로 남깁니다.** 대상이 아니라고 본 쌍도 테스트의 어느 갈래인지 한 줄로 적습니다. 대상만 골라 보고하면 순회를 건너뛴 것과 구분되지 않습니다. 쌍이 20개를 넘으면 표는 대상과 경계 사례만 싣고 나머지는 "N개는 독립 정보로 판정"처럼 묶어도 됩니다.
-
-이 판정은 글을 쓴 모델이 자기 글에 대해 내리는 것이라 **자기 검수 편향에 노출됩니다.** 그래서 판정을 인상이 아니라 삭제 테스트로 고정했습니다. "읽어보니 자연스럽다"는 판정 근거가 되지 않습니다. `lead`를 실제로 지워보고 `follow`만으로 정보가 온전한지 확인한 결과를 적습니다.
+**판정 결과를 쌍 단위로 남깁니다.** `review_required`의 `reporting`에 따라 삭제 결과, 문장 관계, 재구성문, 채택 또는 유지 이유를 기록합니다. 관계가 없는 쌍도 그 이유를 남깁니다. 관계가 있는 쌍은 최종적으로 유지하더라도 재구성문을 생략하지 않습니다. “독립 정보가 있다” 또는 “읽어보니 자연스럽다”만으로 유지하지 않습니다.
 
 구문 검사에서도 **되돌린 문장을 실제로 적습니다.** 되돌려 보지 않고 "자연스럽다"로 넘기지 않습니다. 그리고 분열문은 한국어에도 있는 정상 구문이라 **전부 풀지 않습니다** — 문서에 한두 번 남는 것은 강조로 기능합니다.
 
