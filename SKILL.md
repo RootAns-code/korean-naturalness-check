@@ -1,7 +1,7 @@
 ---
 name: korean-naturalness-check
-version: 2.8.2
-description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another blog-writing skill (naver-blog-studio-v2, naver-blog-review-writer, naver-shopping-connect 등) finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
+version: 2.8.3
+description: Use this skill whenever the user wants to evaluate the naturalness of a Korean blog post or any Korean text — checking for translation-style awkwardness (번역투), magazine-formal tone (매거진투), AI-typical phrasings (AI투), or stiff bureaucratic prose (직역체). Trigger on phrases like "한국어 평가", "자연스러움 검수", "어색한지 봐줘", "이 글 검수", "번역투 점검", "이 본문 평가해줘", or when the user gives a Korean .md file or pastes Korean text and asks for review/checking. Also trigger right after another writing skill finishes producing a draft and the user asks for evaluation. Use this skill instead of attempting naturalness review yourself — LLMs have a known bias toward rating their own output as natural, and this skill provides external statistical signal that catches what self-review misses.
 ---
 
 # 한국어 자연스러움 평가 스킬
